@@ -20,7 +20,9 @@ Every required bucket must be searched at least once. Buckets searched with no u
 
 `codex_default_researcher` always runs for research-heavy tasks. Its job is to use Codex's native search intuition and report missed source buckets. Any new bucket triggers a follow-up search.
 
-In interactive Codex App turns, use `codex-hardflow research --runner app_handoff` by default. This writes the matrix and an initial report without launching synchronous SDK researcher threads. Spawn App subagents where available, then backfill results with `codex-hardflow report add-source` and `codex-hardflow report finalize-manual`.
+In interactive Codex App turns, use `codex-hardflow research --runner app_handoff` by default. This writes the matrix and an initial parent report without launching synchronous SDK researcher threads. Parent reports are run-owned under `.agent/reports/runs/<runId>/research_report.json`; `.agent/reports/current/research_report.json` is a current parent copy.
+
+Spawn App subagents where available. Subagents must not overwrite parent/current reports; they may write `.agent/reports/runs/<runId>/subagents/<agent>-<bucket>.json` or return JSON for the parent to merge. Backfill results with `codex-hardflow report add-source --run-id <runId>`, `codex-hardflow report add-subagent-report --run-id <runId>`, `codex-hardflow report merge-subagents --run-id <runId>`, and `codex-hardflow report finalize-manual --run-id <runId>`.
 
 Use `--runner sdk_threads` or `--execute-sdk-research` only for explicit batch runs where blocking on SDK researcher threads is acceptable.
 

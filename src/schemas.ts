@@ -20,6 +20,8 @@ export type ResearchRunnerMode = "app_handoff" | "sdk_threads" | "manual_fallbac
 export type ResearchReportStatus = "completed" | "degraded" | "failed";
 export type ResearchBucketStatus = "completed" | "searched_but_no_signal" | "failed" | "timeout" | "manual_fallback" | "manual_backfilled" | "context_exhausted";
 export type ResearchAgentRunStatus = "completed" | "failed" | "timeout" | "spawn_failed" | "context_exhausted" | "manual_fallback";
+export type ResearchReportOwner = "parent" | "subagent";
+export type SubagentReportStatus = "completed" | "timeout" | "failed" | "searched_but_no_signal";
 
 export interface TaskClassification {
   researchHeavy: boolean;
@@ -97,6 +99,14 @@ export interface ResearchAgentRun {
 }
 
 export interface ResearchReport {
+  runId: string;
+  parentRunId?: string;
+  owner: ResearchReportOwner;
+  parentTaskPromptHash: string;
+  subagentName?: string;
+  bucket?: string;
+  mergedSubagentReports: string[];
+  currentPointerUpdatedAt?: string;
   task: string;
   rawUserPrompt: string;
   normalizedTask: string;
@@ -132,6 +142,20 @@ export interface ResearchReport {
   confidence_summary: string;
   citations_or_refs: string[];
   prompt_injection_notes: string[];
+}
+
+export interface SubagentReport {
+  runId: string;
+  parentRunId: string;
+  agent: string;
+  bucket: string;
+  status: SubagentReportStatus;
+  sources_found: ResearchSource[];
+  searched_but_no_signal: boolean;
+  queries_run: string[];
+  failure_reason: string;
+  startedAt: string;
+  endedAt: string;
 }
 
 export interface PublicTestCaseSummary {

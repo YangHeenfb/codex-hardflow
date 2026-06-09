@@ -25,6 +25,13 @@ function jsonOutput<T>(result: { status: number | null; stdout: string; stderr: 
   return JSON.parse(result.stdout) as T;
 }
 
+interface CliResearchReport {
+  runId: string;
+  searched_sources_table: unknown[];
+  useful_findings: string[];
+  status: string;
+}
+
 describe("report CLI", () => {
   beforeEach(() => {
     process.env.CODEX_HARDFLOW_HOME = mkdtempSync(join(tmpdir(), "hardflow-state-"));
@@ -33,7 +40,8 @@ describe("report CLI", () => {
   it("report add-source updates searched_sources_table from JSON stdin", () => {
     const cwd = tempRepo();
     const prompt = "research current onboarding patterns for product teams";
-    jsonOutput(runCli(cwd, ["research", "--runner", "app_handoff", "--raw-user-prompt", prompt, prompt]));
+    const initial = jsonOutput<CliResearchReport>(runCli(cwd, ["research", "--runner", "app_handoff", "--raw-user-prompt", prompt, prompt]));
+    expect(initial.runId).toBeTruthy();
 
     const report = jsonOutput<{ searched_sources_table: unknown[]; bucket_statuses: Record<string, string> }>(
       runCli(
@@ -55,6 +63,95 @@ describe("report CLI", () => {
 
     expect(report.searched_sources_table).toHaveLength(1);
     expect(report.bucket_statuses.official_docs).toBe("manual_backfilled");
+  });
+
+  it("report add-source with explicit runId writes the selected report", () => {
+    const cwd = tempRepo();
+    const first = jsonOutput<CliResearchReport>(runCli(cwd, ["research", "--run-id", "run-a", "--runner", "app_handoff", "research current onboarding patterns"]));
+    const second = jsonOutput<CliResearchReport>(runCli(cwd, ["research", "--run-id", "run-b", "--runner", "app_handoff", "research current onboarding patterns"]));
+
+    jsonOutput(
+      runCli(cwd, [
+        "report",
+        "add-source",
+        "--run-id",
+        first.runId,
+        "--bucket",
+        "official_docs",
+        "--title",
+        "Run A source",
+        "--url",
+        "https://example.com/run-a",
+        "--claim",
+        "Run A source reviewed."
+      ])
+    );
+
+    const a = jsonOutput<CliResearchReport>(runCli(cwd, ["report", "show", "--run-id", first.runId]));
+    const b = jsonOutput<CliResearchReport>(runCli(cwd, ["report", "show", "--run-id", second.runId]));
+    expect(a.searched_sources_table).toHaveLength(1);
+    expect(b.searched_sources_table).toHaveLength(0);
+  });
+
+  it("report finalize-manual with runId recomputes only that report", () => {
+    const cwd = tempRepo();
+    const first = jsonOutput<CliResearchReport>(runCli(cwd, ["research", "--run-id", "run-final-a", "--runner", "app_handoff", "research current onboarding patterns"]));
+    const second = jsonOutput<CliResearchReport>(runCli(cwd, ["research", "--run-id", "run-final-b", "--runner", "app_handoff", "research current onboarding patterns"]));
+    jsonOutput(
+      runCli(cwd, [
+        "report",
+        "add-source",
+        "--run-id",
+        first.runId,
+        "--bucket",
+        "official_docs",
+        "--title",
+        "Run A source",
+        "--url",
+        "https://example.com/run-a",
+        "--claim",
+        "Run A source reviewed."
+      ])
+    );
+    jsonOutput(runCli(cwd, ["report", "finalize-manual", "--run-id", first.runId, "--useful-finding", "Run A finding"]));
+
+    const a = jsonOutput<CliResearchReport>(runCli(cwd, ["report", "show", "--run-id", first.runId]));
+    const b = jsonOutput<CliResearchReport>(runCli(cwd, ["report", "show", "--run-id", second.runId]));
+    expect(a.useful_findings).toContain("Run A finding");
+    expect(b.useful_findings).not.toContain("Run A finding");
+  });
+
+  it("report add-subagent-report and merge-subagents use the parent runId", () => {
+    const cwd = tempRepo();
+    const parent = jsonOutput<CliResearchReport>(runCli(cwd, ["research", "--run-id", "run-subagent-cli", "--runner", "app_handoff", "research current onboarding patterns"]));
+
+    jsonOutput(
+      runCli(
+        cwd,
+        ["report", "add-subagent-report", "--run-id", parent.runId],
+        JSON.stringify({
+          agent: "github_researcher",
+          bucket: "github",
+          status: "completed",
+          sources_found: [
+            {
+              bucket: "github",
+              title: "GitHub repo",
+              source_type: "github",
+              url_or_ref: "https://github.com/example/repo",
+              date_or_version: "2026-06-09",
+              claim: "Repository reviewed.",
+              confidence: "medium",
+              notes: "Subagent CLI report."
+            }
+          ],
+          queries_run: ["github query"]
+        })
+      )
+    );
+    const merged = jsonOutput<CliResearchReport>(runCli(cwd, ["report", "merge-subagents", "--run-id", parent.runId]));
+
+    expect(merged.searched_sources_table).toHaveLength(1);
   });
 
   it("report finalize-manual recomputes status and report assert-evidence passes", () => {

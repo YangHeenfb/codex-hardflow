@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHookMarker, type HookMarker } from "../src/hookState.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
-import { addManualSourceToReport, assertResearchReportEvidence, buildResearchReport, runResearch } from "../src/researchOrchestrator.js";
-import { researchReportPath } from "../src/paths.js";
+import { addManualSourceToReport, addSubagentReport, assertResearchReportEvidence, buildResearchReport, loadResearchReport, mergeSubagentReports, runResearch } from "../src/researchOrchestrator.js";
+import { currentResearchReportPath, researchReportPath, researchRunReportPath, researchSubagentReportPath } from "../src/paths.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-research-"));
@@ -25,8 +25,13 @@ function validRunnerJson(bucket: string): string {
 }
 
 function writeReport(cwd: string, marker: HookMarker, report: Record<string, unknown>): void {
+  report.runId = marker.runId;
+  report.owner = report.owner ?? "parent";
   report.generatedAt = new Date(Date.parse(marker.createdAt) + 1_000).toISOString();
-  writeFileSync(researchReportPath(cwd), `${JSON.stringify(report, null, 2)}\n`);
+  for (const target of [researchRunReportPath(cwd, marker.runId), currentResearchReportPath(cwd)]) {
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
+  }
 }
 
 describe("research runner reports", () => {
@@ -205,6 +210,60 @@ describe("research runner reports", () => {
     const gate = stopValidationGate({ cwd, turnId: "turn-app-handoff-empty" });
     expect(gate.decision).toBe("block");
     expect(String(gate.reason)).toContain("Spawn App subagents");
+  });
+
+  it("app_handoff creates a runId and writes parent report to runs plus current copy", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("research current AI coding agent evaluation approaches", cwd, {
+      sourceRoot: process.cwd(),
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-run-owned" }
+    });
+
+    expect(report.runId).toBe("run-turn-run-owned");
+    expect(report.owner).toBe("parent");
+    expect(existsSync(researchRunReportPath(cwd, report.runId))).toBe(true);
+    expect(existsSync(currentResearchReportPath(cwd))).toBe(true);
+    expect(JSON.parse(readFileSync(currentResearchReportPath(cwd), "utf8")).runId).toBe(report.runId);
+  });
+
+  it("subagent report cannot overwrite parent report and only merges through parent flow", async () => {
+    const cwd = tempRepo();
+    const parent = await runResearch("research current onboarding patterns for product teams", cwd, {
+      sourceRoot: process.cwd(),
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-subagent-isolated" }
+    });
+    const parentBefore = readFileSync(researchRunReportPath(cwd, parent.runId), "utf8");
+
+    const subagent = addSubagentReport(cwd, {
+      parentRunId: parent.runId,
+      agent: "official_docs_researcher",
+      bucket: "official_docs",
+      status: "completed",
+      sources_found: [
+        {
+          bucket: "official_docs",
+          title: "Official docs",
+          source_type: "official_docs",
+          url_or_ref: "https://example.com/docs",
+          date_or_version: "2026-06-09",
+          claim: "Official docs reviewed.",
+          confidence: "high",
+          notes: "Subagent result."
+        }
+      ],
+      queries_run: ["official docs query"]
+    });
+
+    expect(existsSync(researchSubagentReportPath(cwd, parent.runId, "official_docs_researcher", "official_docs"))).toBe(true);
+    expect(subagent.parentRunId).toBe(parent.runId);
+    expect(readFileSync(researchRunReportPath(cwd, parent.runId), "utf8")).toBe(parentBefore);
+
+    const merged = mergeSubagentReports(cwd, parent.runId);
+    expect(merged.searched_sources_table).toHaveLength(1);
+    expect(merged.mergedSubagentReports).toContain("official_docs_researcher-official_docs.json");
+    expect(loadResearchReport(cwd, parent.runId).searched_sources_table).toHaveLength(1);
   });
 
   it("app_handoff with manual_backfilled critical sources passes the Stop gate", async () => {

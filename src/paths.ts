@@ -35,6 +35,10 @@ export function agentReportsDir(cwd: string): string {
   return join(resolve(cwd), ".agent", "reports");
 }
 
+export function safeReportSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 140);
+}
+
 export function agentManifestsDir(cwd: string): string {
   return join(resolve(cwd), ".agent", "manifests");
 }
@@ -48,7 +52,43 @@ export function validationSummaryPath(cwd: string): string {
 }
 
 export function researchReportPath(cwd: string): string {
+  return currentResearchReportPath(cwd);
+}
+
+export function legacyResearchReportPath(cwd: string): string {
   return join(agentReportsDir(cwd), "research_report.json");
+}
+
+export function currentResearchReportsDir(cwd: string): string {
+  return join(agentReportsDir(cwd), "current");
+}
+
+export function currentResearchReportPath(cwd: string): string {
+  return join(currentResearchReportsDir(cwd), "research_report.json");
+}
+
+export function researchRunsDir(cwd: string): string {
+  return join(agentReportsDir(cwd), "runs");
+}
+
+export function researchRunDir(cwd: string, runId: string): string {
+  return join(researchRunsDir(cwd), safeReportSegment(runId));
+}
+
+export function researchRunReportPath(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "research_report.json");
+}
+
+export function researchRunMetadataPath(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "metadata.json");
+}
+
+export function researchRunSubagentsDir(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "subagents");
+}
+
+export function researchSubagentReportPath(cwd: string, runId: string, agent: string, bucket: string): string {
+  return join(researchRunSubagentsDir(cwd, runId), `${safeReportSegment(agent)}-${safeReportSegment(bucket)}.json`);
 }
 
 export interface SkillPathStrategy {

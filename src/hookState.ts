@@ -2,13 +2,14 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { cliPathStatus } from "./cliPaths.js";
-import { executorManifestPath, hardflowStateDir, repoHash, researchReportPath, validationSummaryPath } from "./paths.js";
+import { executorManifestPath, hardflowStateDir, repoHash, researchRunReportPath, validationSummaryPath } from "./paths.js";
 
 export type HookMarkerStatus = "active" | "completed" | "bypassed" | "expired";
 export type HookTaskType = "research-heavy" | "implementation" | "validation-sensitive" | "hardflow-maintenance" | "bypass";
 
 export interface HookMarker {
   turnId: string;
+  runId: string;
   cwdHash: string;
   promptHash: string;
   taskType: HookTaskType;
@@ -46,6 +47,7 @@ export interface CreateHookMarkerOptions {
   now?: Date;
   ttlMs?: number;
   maxBlocks?: number;
+  runId?: string;
 }
 
 interface ThreadIndex {
@@ -84,6 +86,10 @@ function firstString(input: Record<string, unknown>, paths: string[]): string | 
 
 function explicitTurnId(input: Record<string, unknown>): string | undefined {
   return firstString(input, ["turn_id", "turnId", "turnID", "request_id", "requestId", "submission_id", "submissionId", "turn.id", "hardflowTurnId", "hardflow_turn_id"]);
+}
+
+function explicitRunId(input: Record<string, unknown>): string | undefined {
+  return firstString(input, ["run_id", "runId", "hardflowRunId", "hardflow_run_id"]);
 }
 
 function threadKey(input: Record<string, unknown>): string | undefined {
@@ -138,9 +144,11 @@ export function createHookMarker(options: CreateHookMarkerOptions): HookMarker {
   const turnId = explicitTurnId(input)
     ? safeSegment(explicitTurnId(input) ?? "")
     : safeSegment(`${cwdHash}-${promptHash}-${hashText(createdAt)}`);
+  const runId = safeSegment(options.runId ?? explicitRunId(input) ?? `run-${turnId}`);
   const pathStatus = cliPathStatus(options.sourceRoot);
   const marker: HookMarker = {
     turnId,
+    runId,
     cwdHash,
     promptHash,
     taskType: options.taskType,
@@ -160,7 +168,7 @@ export function createHookMarker(options: CreateHookMarkerOptions): HookMarker {
     wrapperAvailable: pathStatus.wrapperAvailable,
     shellPathAvailable: pathStatus.shellPathAvailable,
     appPathAvailable: pathStatus.appPathAvailable,
-    expectedResearchReportPath: researchReportPath(cwd),
+    expectedResearchReportPath: researchRunReportPath(cwd, runId),
     expectedExecutorManifestPath: executorManifestPath(cwd),
     expectedValidationSummaryPath: validationSummaryPath(cwd)
   };
@@ -200,6 +208,18 @@ function markerFromPromptHash(cwdHash: string, input: Record<string, unknown>): 
 export function resolveCurrentMarker(input: Record<string, unknown> = {}, cwd = process.cwd()): HookMarker | null {
   const cwdHash = repoHash(resolve(cwd));
   return markerFromExplicitTurn(cwdHash, input) ?? markerFromThreadIndex(cwdHash, input) ?? markerFromPromptHash(cwdHash, input);
+}
+
+export function resolveLatestActiveMarker(cwd = process.cwd()): HookMarker | null {
+  const cwdHash = repoHash(resolve(cwd));
+  const root = join(hardflowStateDir(), cwdHash);
+  if (!existsSync(root)) return null;
+  const markers = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== "threads")
+    .map((entry) => readJson<HookMarker>(join(root, entry.name, "hook_state.json")))
+    .filter((marker): marker is HookMarker => marker !== null && marker.status === "active" && !markerExpired(marker) && typeof marker.runId === "string");
+  markers.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  return markers[0] ?? null;
 }
 
 export function markerExpired(marker: HookMarker, now = new Date()): boolean {

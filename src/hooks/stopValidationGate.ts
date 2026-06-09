@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_LOOP_CONFIG } from "../config.js";
-import { executorManifestPath, researchReportPath, validationSummaryPath } from "../paths.js";
+import { currentResearchReportPath, executorManifestPath, legacyResearchReportPath, researchRunReportPath, validationSummaryPath } from "../paths.js";
 import type { CodexDefaultDiscoveryStatus, ResearchAgentRun, ResearchBucketStatus, ResearchReport, ResearcherReport, ValidationSummary } from "../schemas.js";
 import { sanitizeText } from "../sanitizer.js";
 import { incrementBlockCount, markerExpired, resolveCurrentMarker, updateMarker, type HookMarker } from "../hookState.js";
@@ -62,11 +62,45 @@ function bucketStatusHasRecord(report: ResearchReport, bucket: string, status: R
   return false;
 }
 
+function fallbackResearchReportPath(cwd: string): string | null {
+  if (existsSync(currentResearchReportPath(cwd))) return currentResearchReportPath(cwd);
+  if (existsSync(legacyResearchReportPath(cwd))) return legacyResearchReportPath(cwd);
+  return null;
+}
+
+function validateCurrentPointer(cwd: string, report: ResearchReport): { valid: boolean; reason?: string } {
+  const currentPath = currentResearchReportPath(cwd);
+  if (!existsSync(currentPath)) return { valid: true };
+  const current = parseJson<ResearchReport>(currentPath);
+  if (!current) return { valid: false, reason: "current research_report.json is not valid JSON." };
+  if (current.runId && current.runId !== report.runId) {
+    return { valid: false, reason: "current research_report.json points to a different runId than the current hardflow marker." };
+  }
+  return { valid: true };
+}
+
 function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid: boolean; reason?: string } {
-  const path = researchReportPath(cwd);
+  const markerRunId = typeof marker.runId === "string" && marker.runId.length > 0 ? marker.runId : undefined;
+  const path = markerRunId ? researchRunReportPath(cwd, markerRunId) : fallbackResearchReportPath(cwd);
+  if (!markerRunId) {
+    if (marker.blockCount > 0) {
+      return { valid: false, reason: "hardflow marker is missing runId; rerun codex-hardflow research --runner app_handoff to create a run-owned report." };
+    }
+    if (!path) return { valid: false, reason: "hardflow marker is missing runId and no fallback research_report.json exists; rerun app_handoff research." };
+  }
+  if (!path) return { valid: false, reason: "research_report.json path could not be resolved for this hardflow marker." };
   if (!existsSync(path)) return { valid: false, reason: "research_report.json is missing for this hardflow turn." };
   const report = parseJson<ResearchReport>(path);
   if (!report) return { valid: false, reason: "research_report.json is not valid JSON." };
+  if (markerRunId && report.runId !== markerRunId) {
+    return { valid: false, reason: "research_report.json runId does not match the current hardflow marker." };
+  }
+  if (report.owner !== "parent") {
+    return { valid: false, reason: "subagent-owned research_report cannot satisfy the parent Stop gate." };
+  }
+  if (report.parentRunId) {
+    return { valid: false, reason: "subagent-only or child report cannot satisfy the parent Stop gate." };
+  }
   if (report.promptHash !== marker.promptHash) {
     return { valid: false, reason: "research_report.json promptHash does not match the current hardflow marker." };
   }
@@ -85,6 +119,8 @@ function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid
   if (typeof report.bucket_statuses !== "object" || report.bucket_statuses === null) {
     return { valid: false, reason: "research_report.json is missing bucket_statuses." };
   }
+  const pointer = validateCurrentPointer(cwd, report);
+  if (!pointer.valid) return pointer;
   if (report.subagent_status === "available" && report.runner_mode === "manual_fallback" && !report.agent_runs.some((run) => run.status !== "manual_fallback")) {
     return { valid: false, reason: "Subagent capability was available, but no subagents or SDK runner were used. Rerun with explicit subagents or SDK threads." };
   }

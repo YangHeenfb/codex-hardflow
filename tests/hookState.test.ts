@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,8 +7,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createHookMarker, markerPathFor, updateMarker, type HookMarker } from "../src/hookState.js";
 import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
-import { buildResearchReport } from "../src/researchOrchestrator.js";
-import { repoHash, researchReportPath } from "../src/paths.js";
+import { addManualSourceToReport, buildResearchReport, runResearch } from "../src/researchOrchestrator.js";
+import { currentResearchReportPath, legacyResearchReportPath, repoHash, researchRunReportPath } from "../src/paths.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-hook-"));
@@ -17,9 +18,12 @@ function tempRepo(): string {
 }
 
 function writeReport(cwd: string, marker: HookMarker, prompt: string, generatedAt?: string): void {
-  const report = buildResearchReport(prompt);
+  const report = buildResearchReport(prompt, [], "not_configured", { runId: marker.runId, turnId: marker.turnId });
   report.generatedAt = generatedAt ?? new Date(Date.parse(marker.createdAt) + 1_000).toISOString();
-  writeFileSync(researchReportPath(cwd), `${JSON.stringify(report, null, 2)}\n`);
+  for (const target of [researchRunReportPath(cwd, marker.runId), currentResearchReportPath(cwd)]) {
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
+  }
 }
 
 describe("hook marker Stop gate", () => {
@@ -132,6 +136,91 @@ describe("hook marker Stop gate", () => {
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
     expect(result.decision).toBe("allow");
     expect(result.hardflowStatus).toBe("failed_max_blocks_reached");
+  });
+
+  it("Stop hook reads marker.runId report instead of stale legacy cwd report", async () => {
+    const cwd = tempRepo();
+    const prompt = "research current onboarding patterns for product teams";
+    const report = await runResearch(prompt, cwd, {
+      sourceRoot: process.cwd(),
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-runid-stop" }
+    });
+    for (const [bucket, url] of [
+      ["official_docs", "https://example.com/docs"],
+      ["github", "https://github.com/example/repo"],
+      ["codex_default_discovery", "https://example.com/default"]
+    ] as const) {
+      addManualSourceToReport(cwd, {
+        runId: report.runId,
+        bucket,
+        title: `${bucket} source`,
+        url_or_ref: url,
+        claim: `${bucket} reviewed.`,
+        finding: `${bucket} finding.`
+      });
+    }
+
+    const stale = buildResearchReport("research stale task", [], "not_configured", { runId: "stale-run" });
+    writeFileSync(legacyResearchReportPath(cwd), `${JSON.stringify(stale, null, 2)}\n`);
+
+    expect(stopValidationGate({ cwd, turnId: "turn-runid-stop" }).decision).toBe("allow");
+  });
+
+  it("rejects a stale report from an old run for the current marker", () => {
+    const cwd = tempRepo();
+    const prompt = "research current security architecture";
+    const marker = createHookMarker({
+      cwd,
+      prompt,
+      sourceRoot: process.cwd(),
+      taskType: "research-heavy",
+      requiresSourceMatrix: true,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      input: { turnId: "turn-stale-run" }
+    });
+    const stale = buildResearchReport("research stale security architecture", [], "not_configured", {
+      runId: "old-run",
+      turnId: "old-turn",
+      generatedAt: new Date(Date.parse(marker.createdAt) + 1_000).toISOString()
+    });
+    for (const target of [researchRunReportPath(cwd, marker.runId), currentResearchReportPath(cwd)]) {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, `${JSON.stringify(stale, null, 2)}\n`);
+    }
+
+    expect(stopValidationGate({ cwd, turnId: marker.turnId }).decision).toBe("block");
+  });
+
+  it("rejects subagent-owned reports as parent Stop gate evidence", () => {
+    const cwd = tempRepo();
+    const prompt = "research current security architecture";
+    const marker = createHookMarker({
+      cwd,
+      prompt,
+      sourceRoot: process.cwd(),
+      taskType: "research-heavy",
+      requiresSourceMatrix: true,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      input: { turnId: "turn-subagent-owned" }
+    });
+    const subagentOwned = buildResearchReport(prompt, [], "not_configured", {
+      runId: marker.runId,
+      turnId: marker.turnId,
+      owner: "subagent",
+      parentRunId: marker.runId,
+      subagentName: "official_docs_researcher",
+      bucket: "official_docs",
+      generatedAt: new Date(Date.parse(marker.createdAt) + 1_000).toISOString()
+    });
+    for (const target of [researchRunReportPath(cwd, marker.runId), currentResearchReportPath(cwd)]) {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, `${JSON.stringify(subagentOwned, null, 2)}\n`);
+    }
+
+    expect(stopValidationGate({ cwd, turnId: marker.turnId }).decision).toBe("block");
   });
 
   it("allows no-HEAD repos with untracked files when there is no marker", () => {

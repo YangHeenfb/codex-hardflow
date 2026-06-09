@@ -31,8 +31,10 @@ The package pins `@openai/codex-sdk` to `0.134.0`. Do not upgrade the Codex CLI 
 ```sh
 codex-hardflow status
 codex-hardflow research --runner app_handoff "compare current React data fetching options"
-codex-hardflow report add-source --bucket official_docs --title "Docs" --url "https://example.com" --claim "Primary source reviewed"
-codex-hardflow report finalize-manual --useful-finding "Recorded App/manual research evidence"
+codex-hardflow report add-source --run-id <runId> --bucket official_docs --title "Docs" --url "https://example.com" --claim "Primary source reviewed"
+codex-hardflow report add-subagent-report --run-id <runId> --agent official_docs_researcher --bucket official_docs --status completed
+codex-hardflow report merge-subagents --run-id <runId>
+codex-hardflow report finalize-manual --run-id <runId> --useful-finding "Recorded App/manual research evidence"
 codex-hardflow implement "add validation-sensitive feature"
 codex-hardflow validate
 codex-hardflow repair-loop
@@ -40,7 +42,7 @@ codex-hardflow parallel modules.yaml
 codex-hardflow verify
 ```
 
-Use `codex-hardflow research --runner sdk_threads` or `--execute-sdk-research` only when you intentionally want the CLI to launch Codex SDK researcher threads. Interactive Codex App turns should use `app_handoff` and backfill App/manual/subagent findings through the `report` CLI.
+Use `codex-hardflow research --runner sdk_threads` or `--execute-sdk-research` only when you intentionally want the CLI to launch Codex SDK researcher threads. Interactive Codex App turns should use `app_handoff` and backfill App/manual/subagent findings through the `report` CLI. Parent reports are run-owned under `.agent/reports/runs/<runId>/research_report.json`; `.agent/reports/current/research_report.json` is only the current parent copy.
 
 ## Global Installation
 

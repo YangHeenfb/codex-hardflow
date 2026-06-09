@@ -85,20 +85,20 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
   return allowOutput(
     [
       `Use codex-hardflow for this turn. Hook command fallback: ${absoluteCommand}. Prefer this absolute command even if shell PATH can find codex-hardflow; app PATH may differ.`,
-      `Hardflow marker: turnId=${marker.turnId}, promptHash=${marker.promptHash}, createdAt=${marker.createdAt}, expiresAt=${marker.expiresAt}. Stop gate must only use the marker for this turn/thread.`,
+      `Hardflow marker: turnId=${marker.turnId}, runId=${marker.runId}, promptHash=${marker.promptHash}, createdAt=${marker.createdAt}, expiresAt=${marker.expiresAt}. Stop gate must only use the marker/runId for this turn/thread.`,
       routing.requiresSourceMatrix
         ? [
             "This is a research-heavy task. Use app_handoff mode for interactive Codex App research.",
             "Do not synchronously launch Codex SDK researcher threads unless explicitly requested with --runner sdk_threads or --execute-sdk-research.",
-            "Generate or verify .agent/reports/research_report.json in app_handoff mode and always include codex_default_researcher.",
+            `Generate or verify the parent report at .agent/reports/runs/${marker.runId}/research_report.json and the current copy at .agent/reports/current/research_report.json in app_handoff mode. Always include codex_default_researcher.`,
             "Before manual web search, discover/load available multi-agent or subagent capability; if a lazy-loaded tool is required, load it first.",
             `If subagent capability is available, explicitly spawn these source-specific researcher subagents: ${researcherAgents.join(", ")}.`,
-            `Safe App handoff command example: ${absoluteCommand} research --runner app_handoff --raw-user-prompt ${JSON.stringify(prompt)} ${JSON.stringify(prompt)}.`,
+            `Safe App handoff command example: ${absoluteCommand} research --runner app_handoff --run-id ${JSON.stringify(marker.runId)} --raw-user-prompt ${JSON.stringify(prompt)} ${JSON.stringify(prompt)}.`,
             "If subagents are unavailable, set subagent_status = unavailable with reason.",
-            "If subagents time out, record timeout in research_report.",
-            "Backfill App/manual/subagent results using official CLI commands: codex-hardflow report add-source and codex-hardflow report finalize-manual.",
-            "Do not use inline internal TypeScript imports to backfill research_report; normal App runs must use the stable CLI.",
-            "Do not produce a final answer until .agent/reports/research_report.json exists for this promptHash and contains source_matrix, codex_default_discovery_status, agent_runs, bucket_statuses, and recorded evidence."
+            `Subagents must not write the parent report or current report. They may write only .agent/reports/runs/${marker.runId}/subagents/<agent>-<bucket>.json, or output JSON for the parent to merge.`,
+            `Backfill App/manual/subagent results using official CLI commands with this runId: codex-hardflow report add-source --run-id ${marker.runId}, codex-hardflow report add-subagent-report --run-id ${marker.runId}, codex-hardflow report merge-subagents --run-id ${marker.runId}, and codex-hardflow report finalize-manual --run-id ${marker.runId}.`,
+            "Do not use inline internal TypeScript imports or development TypeScript entrypoints to backfill research_report in normal App research tasks; those dev entrypoints are for explicit maintainer work only.",
+            "Do not produce a final answer until the run-owned parent research_report.json exists for this promptHash and contains source_matrix, codex_default_discovery_status, agent_runs, bucket_statuses, owner=parent, runId, and recorded evidence."
           ].join(" ")
         : "",
       routing.requiresExecutorManifest ? "For non-maintenance implementation, write .agent/manifests/executor_manifest.json before stopping." : "",

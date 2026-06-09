@@ -16,8 +16,8 @@ import { userPromptSubmit } from "./hooks/userPromptSubmit.js";
 import { planParallelModules } from "./parallelOrchestrator.js";
 import { codexHome, privateStoreRoot, skillPathStrategy, validationSummaryPath } from "./paths.js";
 import { runLogprobsProbe } from "./probes/logprobsProbe.js";
-import { addManualSourceToReport, assertResearchReportEvidence, finalizeManualReport, loadResearchReport, researchReportSummary, runResearch } from "./researchOrchestrator.js";
-import type { Confidence, ResearchRunnerMode } from "./schemas.js";
+import { addManualSourceToReport, addSubagentReport, assertResearchReportEvidence, finalizeManualReport, loadResearchReport, mergeSubagentReports, researchReportSummary, runResearch } from "./researchOrchestrator.js";
+import type { Confidence, ResearchRunnerMode, ResearchSource, SubagentReportStatus } from "./schemas.js";
 import { validate } from "./validationOrchestrator.js";
 
 const require = createRequire(import.meta.url);
@@ -107,6 +107,15 @@ function stringArrayField(input: Record<string, unknown>, keys: string[]): strin
   return undefined;
 }
 
+function sourceArrayField(input: Record<string, unknown>, keys: string[]): ResearchSource[] | undefined {
+  for (const key of keys) {
+    const value = input[key];
+    if (!Array.isArray(value)) continue;
+    return value.filter((item): item is ResearchSource => typeof item === "object" && item !== null && "title" in item && "url_or_ref" in item && "claim" in item);
+  }
+  return undefined;
+}
+
 function pickString(flags: Record<string, string | true>, input: Record<string, unknown>, flagKeys: string[], jsonKeys: string[], required = false): string | undefined {
   for (const flag of flagKeys) {
     const value = stringFlag(flags, flag);
@@ -121,6 +130,10 @@ function pickStringArray(flags: Record<string, string | true>, input: Record<str
   const fromFlag = stringFlag(flags, flagKey);
   const fromJson = stringArrayField(input, jsonKeys) ?? [];
   return fromFlag ? [...fromJson, fromFlag] : fromJson.length > 0 ? fromJson : undefined;
+}
+
+function validSubagentStatus(value: string | undefined): value is SubagentReportStatus {
+  return value === "completed" || value === "timeout" || value === "failed" || value === "searched_but_no_signal";
 }
 
 function sdkProgress(event: { agent: string; bucket: string; status: string; message: string }): void {
@@ -232,6 +245,7 @@ async function main(): Promise<void> {
             sourceRoot,
             rawUserPrompt: stringFlag(parsed.flags, "raw-user-prompt") ?? task,
             normalizedTask: task,
+            runId: stringFlag(parsed.flags, "run-id"),
             runnerMode,
             executeSdkResearch,
             maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
@@ -254,6 +268,7 @@ async function main(): Promise<void> {
           printJson(
             addManualSourceToReport(cwd, {
               bucket: pickString(parsed.flags, input, ["bucket"], ["bucket"], true) ?? "",
+              runId: pickString(parsed.flags, input, ["run-id"], ["runId", "run_id"]),
               title: pickString(parsed.flags, input, ["title"], ["title"], true) ?? "",
               source_type: pickString(parsed.flags, input, ["source-type"], ["source_type", "sourceType"]),
               url_or_ref: pickString(parsed.flags, input, ["url-or-ref", "url"], ["url_or_ref", "urlOrRef", "url"], true) ?? "",
@@ -271,6 +286,7 @@ async function main(): Promise<void> {
           const input = await readOptionalStdinJson();
           printJson(
             finalizeManualReport(cwd, {
+              runId: pickString(parsed.flags, input, ["run-id"], ["runId", "run_id"]),
               usefulFindings: pickStringArray(parsed.flags, input, "useful-finding", ["usefulFindings", "useful_findings"]),
               conflictingFindings: pickStringArray(parsed.flags, input, "conflicting-finding", ["conflictingFindings", "conflicting_findings"]),
               sourceGaps: pickStringArray(parsed.flags, input, "source-gap", ["sourceGaps", "source_gaps"]),
@@ -280,23 +296,48 @@ async function main(): Promise<void> {
           );
           return;
         }
+        if (subcommand === "add-subagent-report") {
+          const input = await readOptionalStdinJson();
+          const status = pickString(parsed.flags, input, ["status"], ["status"], true);
+          if (!validSubagentStatus(status)) throw new Error("--status must be completed, timeout, failed, or searched_but_no_signal.");
+          printJson(
+            addSubagentReport(cwd, {
+              parentRunId: pickString(parsed.flags, input, ["run-id"], ["parentRunId", "parent_run_id"]),
+              runId: pickString(parsed.flags, input, ["subagent-run-id"], ["subagentRunId", "subagent_run_id", "runId", "run_id"]),
+              agent: pickString(parsed.flags, input, ["agent"], ["agent"], true) ?? "",
+              bucket: pickString(parsed.flags, input, ["bucket"], ["bucket"], true) ?? "",
+              status,
+              sources_found: sourceArrayField(input, ["sources_found", "sourcesFound"]),
+              searched_but_no_signal: booleanFlag(parsed.flags, "searched-but-no-signal") || input.searched_but_no_signal === true || input.searchedButNoSignal === true,
+              queries_run: pickStringArray(parsed.flags, input, "query", ["queries_run", "queriesRun"]),
+              failure_reason: pickString(parsed.flags, input, ["failure-reason"], ["failure_reason", "failureReason"]),
+              startedAt: pickString(parsed.flags, input, ["started-at"], ["startedAt", "started_at"]),
+              endedAt: pickString(parsed.flags, input, ["ended-at"], ["endedAt", "ended_at"])
+            })
+          );
+          return;
+        }
+        if (subcommand === "merge-subagents") {
+          printJson(mergeSubagentReports(cwd, stringFlag(parsed.flags, "run-id")));
+          return;
+        }
         if (subcommand === "status") {
-          printJson(researchReportSummary(cwd));
+          printJson(researchReportSummary(cwd, stringFlag(parsed.flags, "run-id")));
           return;
         }
         if (subcommand === "show") {
-          printJson(loadResearchReport(cwd));
+          printJson(loadResearchReport(cwd, stringFlag(parsed.flags, "run-id")));
           return;
         }
         if (subcommand === "assert-evidence") {
           const input = await readOptionalStdinJson();
           const finalAnswerSources = pickStringArray(parsed.flags, input, "final-answer-source", ["finalAnswerSources", "final_answer_sources"]);
-          const result = assertResearchReportEvidence(loadResearchReport(cwd), { finalAnswerSources });
+          const result = assertResearchReportEvidence(loadResearchReport(cwd, stringFlag(parsed.flags, "run-id")), { finalAnswerSources });
           printJson(result);
           if (!result.passed) process.exitCode = 1;
           return;
         }
-        throw new Error("Usage: codex-hardflow report <add-source|finalize-manual|status|show|assert-evidence>");
+        throw new Error("Usage: codex-hardflow report <add-source|finalize-manual|add-subagent-report|merge-subagents|status|show|assert-evidence>");
       }
       case "implement": {
         const task = args.join(" ");
@@ -366,9 +407,11 @@ async function main(): Promise<void> {
         printJson({
           usage: [
             "codex-hardflow status",
-            "codex-hardflow research [--runner app_handoff|sdk_threads|manual_fallback] [--execute-sdk-research] \"task...\"",
-            "codex-hardflow report add-source --bucket <bucket> --title <title> --url <url> --claim <claim>",
-            "codex-hardflow report finalize-manual [--useful-finding text]",
+            "codex-hardflow research [--run-id <runId>] [--runner app_handoff|sdk_threads|manual_fallback] [--execute-sdk-research] \"task...\"",
+            "codex-hardflow report add-source [--run-id <runId>] --bucket <bucket> --title <title> --url <url> --claim <claim>",
+            "codex-hardflow report finalize-manual [--run-id <runId>] [--useful-finding text]",
+            "codex-hardflow report add-subagent-report [--run-id <parentRunId>] --agent <agent> --bucket <bucket> --status <status>",
+            "codex-hardflow report merge-subagents [--run-id <runId>]",
             "codex-hardflow report status",
             "codex-hardflow report show",
             "codex-hardflow report assert-evidence",

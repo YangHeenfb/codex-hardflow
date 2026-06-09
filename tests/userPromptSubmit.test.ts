@@ -35,8 +35,12 @@ describe("UserPromptSubmit research-heavy injection", () => {
     expect(additionalContext(result)).toContain("codex-hardflow report add-source");
     expect(additionalContext(result)).toContain("codex-hardflow report finalize-manual");
     expect(additionalContext(result)).toContain("research --runner app_handoff");
+    expect(additionalContext(result)).toContain("--run-id");
+    expect(additionalContext(result)).toContain("runs/");
+    expect(additionalContext(result)).toContain("subagents/");
     expect(additionalContext(result)).toContain("Do not synchronously launch Codex SDK researcher threads");
     expect(additionalContext(result)).not.toContain("node --import tsx");
+    expect(additionalContext(result)).not.toContain("npx tsx src/cli.ts");
   });
 
   it("injects local_repo and competitor researchers for current-project comparison prompts", () => {
@@ -60,5 +64,20 @@ describe("UserPromptSubmit research-heavy injection", () => {
     const bypass = userPromptSubmit({ prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd());
     expect(bypass.decision).toBe("allow");
     expect(additionalContext(bypass)).toContain("bypass marker");
+  });
+
+  it("does not apply normal App research dev-entrypoint warnings to explicit maintenance tasks", () => {
+    const result = userPromptSubmit(
+      {
+        cwd: process.cwd(),
+        prompt: "修复 codex-hardflow developer maintenance，明确需要检查 tsx dev entrypoint",
+        turnId: "turn-maintenance-dev-entrypoint"
+      },
+      process.cwd()
+    );
+
+    expect(result.decision).toBe("allow");
+    expect(additionalContext(result)).toContain("hardflow maintenance");
+    expect(additionalContext(result)).not.toContain("normal App research tasks");
   });
 });

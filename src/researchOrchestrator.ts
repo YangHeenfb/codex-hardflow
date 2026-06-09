@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { codexRunnerStatus, runIsolatedCodexPrompt } from "./codexRunner.js";
 import { buildSourceCoverageMatrix, applyDefaultDiscoveryFindings } from "./sourceMatrix.js";
@@ -8,19 +8,30 @@ import type {
   ResearchAgentRunStatus,
   ResearchBucketStatus,
   ResearchReport,
+  ResearchReportOwner,
   ResearcherReport,
   ResearchRunnerMode,
   ResearchSource,
+  SubagentReport,
+  SubagentReportStatus,
   SourceCoverageMatrix
 } from "./schemas.js";
-import { researchReportPath } from "./paths.js";
-import { createHookMarker, hashText } from "./hookState.js";
+import { currentResearchReportPath, researchRunMetadataPath, researchRunReportPath, researchRunSubagentsDir, researchSubagentReportPath } from "./paths.js";
+import { createHookMarker, hashText, resolveLatestActiveMarker } from "./hookState.js";
 
 export interface BuildResearchReportOptions {
   rawUserPrompt?: string;
   normalizedTask?: string;
   turnId?: string;
   taskType?: string;
+  runId?: string;
+  parentRunId?: string;
+  owner?: ResearchReportOwner;
+  parentTaskPromptHash?: string;
+  subagentName?: string;
+  bucket?: string;
+  mergedSubagentReports?: string[];
+  currentPointerUpdatedAt?: string;
   runnerMode?: ResearchRunnerMode;
   manualFallbackReason?: string;
   subagentStatus?: ResearchReport["subagent_status"];
@@ -53,6 +64,20 @@ export interface ResearchProgressEvent {
   agent: string;
   status: "started" | ResearchAgentRunStatus;
   message: string;
+}
+
+export interface AddSubagentReportInput {
+  runId?: string;
+  parentRunId?: string;
+  agent: string;
+  bucket: string;
+  status: SubagentReportStatus;
+  sources_found?: ResearchSource[];
+  searched_but_no_signal?: boolean;
+  queries_run?: string[];
+  failure_reason?: string;
+  startedAt?: string;
+  endedAt?: string;
 }
 
 const DEFAULT_MANUAL_FALLBACK_REASON = "No live subagent or SDK researcher runner was configured for this local report builder.";
@@ -176,6 +201,7 @@ export function buildResearchReport(
   options: BuildResearchReportOptions = {}
 ): ResearchReport {
   const parts = taskParts(task, options);
+  const promptHash = hashText(parts.rawUserPrompt);
   let matrix = sourceMatrixForTask(task, options);
   if (defaultDiscoveryBuckets.length > 0) {
     matrix = applyDefaultDiscoveryFindings(matrix, defaultDiscoveryBuckets);
@@ -196,13 +222,22 @@ export function buildResearchReport(
   const codexRun = agentRuns.find((run) => run.bucket === "codex_default_discovery");
   const searchedSources = researcherReports.flatMap((report) => report.sources_found);
   const status = reportStatusForRunner(runnerMode, bucketStatuses, searchedSources);
+  const runId = options.runId ?? options.turnId ?? `run-${promptHash}-${hashText(generatedAt)}`;
 
   return {
+    runId,
+    parentRunId: options.parentRunId,
+    owner: options.owner ?? "parent",
+    parentTaskPromptHash: options.parentTaskPromptHash ?? promptHash,
+    subagentName: options.subagentName,
+    bucket: options.bucket,
+    mergedSubagentReports: options.mergedSubagentReports ?? [],
+    currentPointerUpdatedAt: options.currentPointerUpdatedAt,
     task,
     rawUserPrompt: parts.rawUserPrompt,
     normalizedTask: parts.normalizedTask,
     classificationInput: parts.classificationInput,
-    promptHash: hashText(parts.rawUserPrompt),
+    promptHash,
     turnId: options.turnId ?? `research-${hashText(task)}`,
     generatedAt,
     taskType: options.taskType ?? "research-heavy",
@@ -460,6 +495,45 @@ async function runBucketsWithConcurrency(
   return results.filter((result): result is { run: ResearchAgentRun; report: ResearcherReport } => result !== undefined);
 }
 
+function writeRunMetadata(cwd: string, report: ResearchReport): void {
+  const target = researchRunMetadataPath(cwd, report.runId);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(
+    target,
+    `${JSON.stringify(
+      {
+        runId: report.runId,
+        owner: report.owner,
+        promptHash: report.promptHash,
+        parentTaskPromptHash: report.parentTaskPromptHash,
+        runner_mode: report.runner_mode,
+        status: report.status,
+        generatedAt: report.generatedAt,
+        currentPointerUpdatedAt: report.currentPointerUpdatedAt
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+function writeParentResearchReport(cwd: string, report: ResearchReport, updateCurrent = true): ResearchReport {
+  if (report.owner !== "parent") throw new Error("Only parent research reports can be written through the parent report writer.");
+  const now = new Date().toISOString();
+  report.generatedAt = report.generatedAt || now;
+  if (updateCurrent) report.currentPointerUpdatedAt = now;
+  const runTarget = researchRunReportPath(cwd, report.runId);
+  mkdirSync(dirname(runTarget), { recursive: true });
+  writeFileSync(runTarget, `${JSON.stringify(report, null, 2)}\n`);
+  if (updateCurrent) {
+    const currentTarget = currentResearchReportPath(cwd);
+    mkdirSync(dirname(currentTarget), { recursive: true });
+    writeFileSync(currentTarget, `${JSON.stringify(report, null, 2)}\n`);
+  }
+  writeRunMetadata(cwd, report);
+  return report;
+}
+
 export async function runResearch(task: string, cwd: string, options: RunResearchOptions = {}): Promise<ResearchReport> {
   const sourceRoot = options.sourceRoot ?? cwd;
   const parts = taskParts(task, options);
@@ -473,6 +547,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     requiresSourceMatrix: true,
     requiresExecutorManifest: false,
     requiresValidation: false,
+    runId: options.runId,
     input: options.input ?? {}
   });
 
@@ -480,6 +555,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
       ...options,
       turnId: marker.turnId,
+      runId: marker.runId,
       rawUserPrompt: parts.rawUserPrompt,
       normalizedTask: parts.normalizedTask,
       runnerMode: "app_handoff",
@@ -491,32 +567,28 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
       subagentInstructionInjected: true,
       manualBackfillRequired: true
     });
-    const target = researchReportPath(cwd);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
-    return report;
+    return writeParentResearchReport(cwd, report, true);
   }
 
   if (runnerMode === "manual_fallback") {
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
       ...options,
       turnId: marker.turnId,
+      runId: marker.runId,
       rawUserPrompt: parts.rawUserPrompt,
       normalizedTask: parts.normalizedTask,
       runnerMode: "manual_fallback",
       manualFallbackReason: options.manualFallbackReason ?? "Manual fallback explicitly requested.",
       subagentStatus: options.subagentStatus ?? "not_loaded"
     });
-    const target = researchReportPath(cwd);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
-    return report;
+    return writeParentResearchReport(cwd, report, true);
   }
 
   if (!codexRunnerStatus().codexExportAvailable || !codexRunnerStatus().threadExportAvailable) {
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
       ...options,
       turnId: marker.turnId,
+      runId: marker.runId,
       rawUserPrompt: parts.rawUserPrompt,
       normalizedTask: parts.normalizedTask,
       runnerMode: "manual_fallback",
@@ -526,10 +598,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
       sdkThreadsAllowed: true,
       manualBackfillRequired: true
     });
-    const target = researchReportPath(cwd);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
-    return report;
+    return writeParentResearchReport(cwd, report, true);
   }
 
   let matrix = sourceMatrixForTask(task, options);
@@ -546,6 +615,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
   const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], codexDefaultStatusFromRun(codexRun, "not_configured"), {
     ...options,
     turnId: marker.turnId,
+    runId: marker.runId,
     rawUserPrompt: parts.rawUserPrompt,
     normalizedTask: parts.normalizedTask,
     runnerMode: "sdk_threads",
@@ -558,13 +628,11 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     bucketStatuses,
     researcherReports
   });
-  const target = researchReportPath(cwd);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
-  return report;
+  return writeParentResearchReport(cwd, report, true);
 }
 
 export interface ManualSourceInput {
+  runId?: string;
   bucket: string;
   title: string;
   source_type?: string;
@@ -577,18 +645,23 @@ export interface ManualSourceInput {
   citation?: string;
 }
 
-export function loadResearchReport(cwd: string): ResearchReport {
-  const target = researchReportPath(cwd);
-  if (!existsSync(target)) throw new Error("research_report.json is missing; run codex-hardflow research first.");
+function resolveReportRunId(cwd: string, explicitRunId?: string): string {
+  if (explicitRunId?.trim()) return explicitRunId.trim();
+  const marker = resolveLatestActiveMarker(cwd);
+  if (marker?.runId) return marker.runId;
+  throw new Error("No current hardflow runId was found. Run codex-hardflow research --runner app_handoff first, or pass --run-id <runId>.");
+}
+
+export function loadResearchReport(cwd: string, runId?: string): ResearchReport {
+  const resolvedRunId = resolveReportRunId(cwd, runId);
+  const target = researchRunReportPath(cwd, resolvedRunId);
+  if (!existsSync(target)) throw new Error(`research_report.json is missing for runId=${resolvedRunId}; run codex-hardflow research --runner app_handoff first.`);
   return JSON.parse(readFileSync(target, "utf8")) as ResearchReport;
 }
 
 function writeResearchReport(cwd: string, report: ResearchReport): ResearchReport {
-  const target = researchReportPath(cwd);
-  mkdirSync(dirname(target), { recursive: true });
   report.generatedAt = new Date().toISOString();
-  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
-  return report;
+  return writeParentResearchReport(cwd, report, true);
 }
 
 function upsertResearcherReport(report: ResearchReport, source: ResearchSource): void {
@@ -634,7 +707,8 @@ function upsertManualAgentRun(report: ResearchReport, bucket: string, sourceCoun
 }
 
 export function addManualSourceToReport(cwd: string, input: ManualSourceInput): ResearchReport {
-  const report = loadResearchReport(cwd);
+  const report = loadResearchReport(cwd, input.runId);
+  if (report.owner !== "parent") throw new Error("Manual sources can only be added to a parent research report.");
   const source: ResearchSource = {
     bucket: input.bucket,
     title: input.title,
@@ -660,8 +734,9 @@ export function addManualSourceToReport(cwd: string, input: ManualSourceInput): 
   return writeResearchReport(cwd, report);
 }
 
-export function finalizeManualReport(cwd: string, updates: { usefulFindings?: string[]; conflictingFindings?: string[]; sourceGaps?: string[]; citationsOrRefs?: string[]; confidenceSummary?: string } = {}): ResearchReport {
-  const report = loadResearchReport(cwd);
+export function finalizeManualReport(cwd: string, updates: { runId?: string; usefulFindings?: string[]; conflictingFindings?: string[]; sourceGaps?: string[]; citationsOrRefs?: string[]; confidenceSummary?: string } = {}): ResearchReport {
+  const report = loadResearchReport(cwd, updates.runId);
+  if (report.owner !== "parent") throw new Error("Only parent research reports can be finalized.");
   report.runner_mode = report.searched_sources_table.length > 0 ? "mixed" : report.runner_mode;
   report.manual_backfill_required = report.searched_sources_table.length === 0;
   report.app_handoff_required = report.runner_mode === "app_handoff";
@@ -670,6 +745,112 @@ export function finalizeManualReport(cwd: string, updates: { usefulFindings?: st
   if (updates.sourceGaps) report.source_gaps = updates.sourceGaps;
   if (updates.citationsOrRefs) report.citations_or_refs.push(...updates.citationsOrRefs);
   if (updates.confidenceSummary) report.confidence_summary = updates.confidenceSummary;
+  report.status = reportStatusForRunner(report.runner_mode, report.bucket_statuses, report.searched_sources_table);
+  return writeResearchReport(cwd, report);
+}
+
+function subagentRunId(parentRunId: string, agent: string, bucket: string, endedAt: string): string {
+  return `${parentRunId}-${agent}-${bucket}-${hashText(endedAt)}`;
+}
+
+export function addSubagentReport(cwd: string, input: AddSubagentReportInput): SubagentReport {
+  const parentRunId = resolveReportRunId(cwd, input.parentRunId ?? input.runId);
+  if (!input.agent.trim()) throw new Error("Missing subagent agent name.");
+  if (!input.bucket.trim()) throw new Error("Missing subagent bucket.");
+  const endedAt = input.endedAt ?? new Date().toISOString();
+  const report: SubagentReport = {
+    runId: input.runId ?? subagentRunId(parentRunId, input.agent, input.bucket, endedAt),
+    parentRunId,
+    agent: input.agent,
+    bucket: input.bucket,
+    status: input.status,
+    sources_found: input.sources_found ?? [],
+    searched_but_no_signal: input.searched_but_no_signal ?? input.status === "searched_but_no_signal",
+    queries_run: input.queries_run ?? [],
+    failure_reason: input.failure_reason ?? "",
+    startedAt: input.startedAt ?? endedAt,
+    endedAt
+  };
+  const target = researchSubagentReportPath(cwd, parentRunId, report.agent, report.bucket);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
+  return report;
+}
+
+function subagentStatusToAgentRunStatus(status: SubagentReportStatus): ResearchAgentRunStatus {
+  if (status === "searched_but_no_signal") return "completed";
+  return status;
+}
+
+function subagentStatusToBucketStatus(subagent: SubagentReport): ResearchBucketStatus {
+  if (subagent.status === "completed") return subagent.searched_but_no_signal || subagent.sources_found.length === 0 ? "searched_but_no_signal" : "completed";
+  if (subagent.status === "searched_but_no_signal") return "searched_but_no_signal";
+  return subagent.status;
+}
+
+function sourceKey(source: ResearchSource): string {
+  return `${source.bucket ?? ""}\u0000${source.title}\u0000${source.url_or_ref}`;
+}
+
+function mergeSource(report: ResearchReport, bucket: string, source: ResearchSource): boolean {
+  const normalized = { ...source, bucket: source.bucket ?? bucket };
+  const existing = new Set(report.searched_sources_table.map(sourceKey));
+  if (existing.has(sourceKey(normalized))) return false;
+  report.searched_sources_table.push(normalized);
+  upsertResearcherReport(report, normalized);
+  return true;
+}
+
+function mergeSubagentRun(report: ResearchReport, subagent: SubagentReport, sourceCount: number): void {
+  const existing = report.agent_runs.find((run) => run.agent === subagent.agent && run.bucket === subagent.bucket && !run.fallback_used);
+  const next: ResearchAgentRun = {
+    agent: subagent.agent,
+    bucket: subagent.bucket,
+    status: subagentStatusToAgentRunStatus(subagent.status),
+    startedAt: subagent.startedAt,
+    endedAt: subagent.endedAt,
+    queries_run: subagent.queries_run,
+    sources_found_count: sourceCount,
+    searched_but_no_signal: subagent.searched_but_no_signal,
+    failure_reason: subagent.failure_reason,
+    fallback_used: false
+  };
+  if (existing) Object.assign(existing, next);
+  else report.agent_runs.push(next);
+}
+
+function shouldReplaceBucketStatus(current: ResearchBucketStatus | undefined, next: ResearchBucketStatus): boolean {
+  if (!current) return true;
+  if (current === "completed" || current === "manual_backfilled") return false;
+  if (next === "completed" || next === "searched_but_no_signal") return true;
+  return current === "manual_fallback";
+}
+
+export function mergeSubagentReports(cwd: string, runId?: string): ResearchReport {
+  const report = loadResearchReport(cwd, runId);
+  if (report.owner !== "parent") throw new Error("Subagent reports can only be merged into a parent research report.");
+  const dir = researchRunSubagentsDir(cwd, report.runId);
+  if (!existsSync(dir)) return writeResearchReport(cwd, report);
+  const files = readdirSync(dir).filter((file) => file.endsWith(".json"));
+  for (const file of files) {
+    const path = `${dir}/${file}`;
+    const subagent = JSON.parse(readFileSync(path, "utf8")) as SubagentReport;
+    if (subagent.parentRunId !== report.runId) continue;
+    const addedSources = subagent.sources_found.reduce((count, source) => count + (mergeSource(report, subagent.bucket, source) ? 1 : 0), 0);
+    mergeSubagentRun(report, subagent, subagent.sources_found.length);
+    const bucketStatus = subagentStatusToBucketStatus(subagent);
+    if (shouldReplaceBucketStatus(report.bucket_statuses[subagent.bucket], bucketStatus)) {
+      report.bucket_statuses[subagent.bucket] = bucketStatus;
+    }
+    if (bucketStatus === "searched_but_no_signal" && !report.searched_but_no_signal.includes(subagent.bucket)) {
+      report.searched_but_no_signal.push(subagent.bucket);
+    }
+    if (addedSources > 0) report.source_gaps = report.source_gaps.filter((bucket) => bucket !== subagent.bucket);
+    if (!report.mergedSubagentReports.includes(file)) report.mergedSubagentReports.push(file);
+  }
+  report.runner_mode = report.searched_sources_table.length > 0 ? "mixed" : report.runner_mode;
+  report.manual_backfill_required = report.searched_sources_table.length === 0;
+  report.app_handoff_required = report.runner_mode === "app_handoff";
   report.status = reportStatusForRunner(report.runner_mode, report.bucket_statuses, report.searched_sources_table);
   return writeResearchReport(cwd, report);
 }
@@ -702,6 +883,12 @@ export interface ResearchEvidenceAssertionOptions {
 }
 
 export function assertResearchReportEvidence(report: ResearchReport, options: ResearchEvidenceAssertionOptions = {}): { passed: boolean; reason?: string } {
+  if (report.owner !== "parent") {
+    return { passed: false, reason: "subagent-owned research_report cannot satisfy a parent research gate." };
+  }
+  if (!report.runId) {
+    return { passed: false, reason: "research_report is missing runId." };
+  }
   const requiredBuckets = report.source_matrix?.requiredBuckets?.length
     ? report.source_matrix.requiredBuckets
     : report.required_buckets ?? [];
@@ -750,10 +937,13 @@ export function assertResearchReportEvidence(report: ResearchReport, options: Re
   return { passed: true };
 }
 
-export function researchReportSummary(cwd: string): Record<string, unknown> {
-  const report = loadResearchReport(cwd);
+export function researchReportSummary(cwd: string, runId?: string): Record<string, unknown> {
+  const report = loadResearchReport(cwd, runId);
   return {
-    path: researchReportPath(cwd),
+    path: researchRunReportPath(cwd, report.runId),
+    currentPath: currentResearchReportPath(cwd),
+    runId: report.runId,
+    owner: report.owner,
     promptHash: report.promptHash,
     turnId: report.turnId,
     generatedAt: report.generatedAt,
