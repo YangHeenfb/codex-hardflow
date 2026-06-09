@@ -4,6 +4,7 @@ import { executorManifestPath, researchReportPath, validationSummaryPath } from 
 import type { CodexDefaultDiscoveryStatus, ResearchAgentRun, ResearchBucketStatus, ResearchReport, ResearcherReport, ValidationSummary } from "../schemas.js";
 import { sanitizeText } from "../sanitizer.js";
 import { incrementBlockCount, markerExpired, resolveCurrentMarker, updateMarker, type HookMarker } from "../hookState.js";
+import { assertResearchReportEvidence } from "../researchOrchestrator.js";
 
 type GateOutput = Record<string, unknown>;
 
@@ -61,32 +62,6 @@ function bucketStatusHasRecord(report: ResearchReport, bucket: string, status: R
   return false;
 }
 
-function isFailureOnly(status: ResearchBucketStatus | undefined): boolean {
-  return status === "timeout" || status === "failed" || status === "context_exhausted" || status === "manual_fallback";
-}
-
-function hasNoSignalEvidence(report: ResearchReport): boolean {
-  return (report.searched_but_no_signal ?? []).length > 0 || Object.values(report.bucket_statuses ?? {}).includes("searched_but_no_signal");
-}
-
-function evidenceGate(report: ResearchReport, requiredBuckets: string[]): { valid: boolean; reason?: string } {
-  const statuses = requiredBuckets.map((bucket) => report.bucket_statuses?.[bucket]).filter((status): status is ResearchBucketStatus => validBucketStatus(status));
-  if (report.status === "failed" || (statuses.length > 0 && statuses.every(isFailureOnly))) {
-    return { valid: false, reason: "research_report evidence gate failed: all required buckets are timeout/failed/context_exhausted/manual_fallback without usable evidence." };
-  }
-  if ((report.searched_sources_table ?? []).length === 0) {
-    return { valid: false, reason: "research_report evidence gate failed: searched_sources_table is empty." };
-  }
-  if ((report.useful_findings ?? []).length === 0 && !hasNoSignalEvidence(report)) {
-    return { valid: false, reason: "research_report evidence gate failed: useful_findings is empty and no searched_but_no_signal buckets are recorded." };
-  }
-  const critical = ["official_docs", "github", "codex_default_discovery"].filter((bucket) => requiredBuckets.includes(bucket));
-  if (critical.length > 0 && critical.every((bucket) => isFailureOnly(report.bucket_statuses?.[bucket]))) {
-    return { valid: false, reason: "research_report evidence gate failed: official_docs, github, and codex_default_discovery do not provide evidence." };
-  }
-  return { valid: true };
-}
-
 function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid: boolean; reason?: string } {
   const path = researchReportPath(cwd);
   if (!existsSync(path)) return { valid: false, reason: "research_report.json is missing for this hardflow turn." };
@@ -119,6 +94,11 @@ function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid
   if (!requiredBuckets.includes("codex_default_discovery")) {
     return { valid: false, reason: "source_matrix must include required codex_default_discovery." };
   }
+  const evidence = assertResearchReportEvidence(report, { researchHeavy: true });
+  const appManualEvidenceMode = (report.runner_mode === "app_handoff" || report.runner_mode === "mixed") && (report.searched_sources_table ?? []).length > 0;
+  if (!evidence.passed && report.runner_mode === "app_handoff" && !appManualEvidenceMode) {
+    return { valid: false, reason: evidence.reason };
+  }
   const missing = requiredBuckets.filter((bucket) => {
     const recordedStatus = report.bucket_statuses[bucket];
     if (validBucketStatus(recordedStatus) && bucketStatusHasRecord(report, bucket, recordedStatus)) return false;
@@ -129,10 +109,16 @@ function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid
     return !(completed || searchedButNoSignal);
   });
   if (missing.length > 0) {
+    if (appManualEvidenceMode) {
+      const criticalMissing = missing.filter((bucket) => bucket === "official_docs" || bucket === "github" || bucket === "codex_default_discovery");
+      if (criticalMissing.length === 0) {
+        if (!evidence.passed) return { valid: false, reason: evidence.reason };
+        return { valid: true };
+      }
+    }
     return { valid: false, reason: `source_matrix required buckets are not completed or searched-but-no-signal: ${missing.join(", ")}.` };
   }
-  const evidence = evidenceGate(report, requiredBuckets);
-  if (!evidence.valid) return evidence;
+  if (!evidence.passed) return { valid: false, reason: evidence.reason };
   return { valid: true };
 }
 

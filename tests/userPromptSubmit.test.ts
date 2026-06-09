@@ -33,6 +33,10 @@ describe("UserPromptSubmit research-heavy injection", () => {
     expect(additionalContext(result)).toContain("agent_runs");
     expect(additionalContext(result)).toContain("bucket_statuses");
     expect(additionalContext(result)).toContain("codex-hardflow report add-source");
+    expect(additionalContext(result)).toContain("codex-hardflow report finalize-manual");
+    expect(additionalContext(result)).toContain("research --runner app_handoff");
+    expect(additionalContext(result)).toContain("Do not synchronously launch Codex SDK researcher threads");
+    expect(additionalContext(result)).not.toContain("node --import tsx");
   });
 
   it("injects local_repo and competitor researchers for current-project comparison prompts", () => {

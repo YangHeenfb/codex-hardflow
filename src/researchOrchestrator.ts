@@ -24,6 +24,11 @@ export interface BuildResearchReportOptions {
   runnerMode?: ResearchRunnerMode;
   manualFallbackReason?: string;
   subagentStatus?: ResearchReport["subagent_status"];
+  appHandoffRequired?: boolean;
+  sdkThreadsStarted?: boolean;
+  sdkThreadsAllowed?: boolean;
+  subagentInstructionInjected?: boolean;
+  manualBackfillRequired?: boolean;
   generatedAt?: string;
   agentRuns?: ResearchAgentRun[];
   bucketStatuses?: Record<string, ResearchBucketStatus>;
@@ -33,15 +38,25 @@ export interface BuildResearchReportOptions {
 export interface RunResearchOptions extends BuildResearchReportOptions {
   sourceRoot?: string;
   input?: Record<string, unknown>;
+  executeSdkResearch?: boolean;
   sdkTimeoutMs?: number;
   perBucketTimeoutMs?: number;
   maxConcurrentBuckets?: number;
   globalBudgetMs?: number;
   sdkPromptRunner?: (prompt: string, cwd: string, bucket: string) => Promise<string>;
   defaultDiscoveryBuckets?: string[];
+  progress?: (event: ResearchProgressEvent) => void;
+}
+
+export interface ResearchProgressEvent {
+  bucket: string;
+  agent: string;
+  status: "started" | ResearchAgentRunStatus;
+  message: string;
 }
 
 const DEFAULT_MANUAL_FALLBACK_REASON = "No live subagent or SDK researcher runner was configured for this local report builder.";
+const DEFAULT_APP_HANDOFF_REASON = "App handoff report initialized; spawn App subagents or backfill manual sources with codex-hardflow report commands.";
 const DEFAULT_PER_BUCKET_TIMEOUT_MS = 180_000;
 const DEFAULT_GLOBAL_BUDGET_MS = 600_000;
 const DEFAULT_MAX_CONCURRENT_BUCKETS = 3;
@@ -143,6 +158,17 @@ function reportStatus(bucketStatuses: Record<string, ResearchBucketStatus>, sear
   return "completed";
 }
 
+function reportStatusForRunner(runnerMode: ResearchRunnerMode, bucketStatuses: Record<string, ResearchBucketStatus>, searchedSources: ResearchSource[]): ResearchReport["status"] {
+  if (runnerMode === "app_handoff" && searchedSources.length === 0) return "degraded";
+  return reportStatus(bucketStatuses, searchedSources);
+}
+
+function manualBackfillRequiredFor(runnerMode: ResearchRunnerMode, status: ResearchReport["status"], searchedSources: ResearchSource[]): boolean {
+  if (runnerMode === "app_handoff" || runnerMode === "manual_fallback") return true;
+  if (runnerMode === "sdk_threads") return status !== "completed" || searchedSources.length === 0;
+  return false;
+}
+
 export function buildResearchReport(
   task: string,
   defaultDiscoveryBuckets: string[] = [],
@@ -168,6 +194,8 @@ export function buildResearchReport(
     options.researcherReports ??
     requiredEntries.map((entry) => reportForEntry(entry, bucketStatuses[String(entry.bucket)] === "searched_but_no_signal"));
   const codexRun = agentRuns.find((run) => run.bucket === "codex_default_discovery");
+  const searchedSources = researcherReports.flatMap((report) => report.sources_found);
+  const status = reportStatusForRunner(runnerMode, bucketStatuses, searchedSources);
 
   return {
     task,
@@ -178,16 +206,21 @@ export function buildResearchReport(
     turnId: options.turnId ?? `research-${hashText(task)}`,
     generatedAt,
     taskType: options.taskType ?? "research-heavy",
-    status: reportStatus(bucketStatuses, researcherReports.flatMap((report) => report.sources_found)),
+    status,
     runner_mode: runnerMode,
+    app_handoff_required: options.appHandoffRequired ?? runnerMode === "app_handoff",
+    sdk_threads_started: options.sdkThreadsStarted ?? runnerMode === "sdk_threads",
+    sdk_threads_allowed: options.sdkThreadsAllowed ?? runnerMode === "sdk_threads",
+    subagent_instruction_injected: options.subagentInstructionInjected ?? runnerMode === "app_handoff",
+    manual_backfill_required: options.manualBackfillRequired ?? manualBackfillRequiredFor(runnerMode, status, searchedSources),
     manual_fallback_reason: runnerMode === "manual_fallback" || runnerMode === "mixed" ? manualFallbackReason : undefined,
-    subagent_status: options.subagentStatus ?? (runnerMode === "subagents" ? "available" : "not_loaded"),
+    subagent_status: options.subagentStatus ?? "not_loaded",
     source_matrix: matrix,
     required_buckets: requiredBuckets,
     bucket_statuses: bucketStatuses,
     agent_runs: agentRuns,
     researcher_reports: researcherReports,
-    searched_sources_table: researcherReports.flatMap((report) => report.sources_found),
+    searched_sources_table: searchedSources,
     searched_but_no_signal: requiredBuckets.filter((bucket) => bucketStatuses[bucket] === "searched_but_no_signal"),
     codex_default_discovery_status: codexDefaultStatusFromRun(codexRun, codexDefaultDiscoveryStatus),
     codex_default_discovery_findings: {
@@ -197,7 +230,12 @@ export function buildResearchReport(
     useful_findings: [],
     conflicting_findings: [],
     source_gaps: requiredBuckets.filter((bucket) => bucketStatuses[bucket] !== "completed"),
-    confidence_summary: runnerMode === "manual_fallback" ? "Manual fallback report; no live runner completed." : "Research runner completed with recorded bucket statuses.",
+    confidence_summary:
+      runnerMode === "app_handoff"
+        ? "App handoff initialized; final confidence depends on backfilled App/manual/subagent evidence."
+        : runnerMode === "manual_fallback"
+          ? "Manual fallback report; no live runner completed."
+          : "Research runner completed with recorded bucket statuses.",
     citations_or_refs: [],
     prompt_injection_notes: [matrix.promptInjectionCaution]
   };
@@ -369,6 +407,10 @@ function timedOutBucketResult(entry: SourceCoverageMatrix["entries"][number], re
   };
 }
 
+function emitProgress(options: RunResearchOptions, event: ResearchProgressEvent): void {
+  options.progress?.(event);
+}
+
 async function runBucketsWithConcurrency(
   task: string,
   cwd: string,
@@ -390,9 +432,27 @@ async function runBucketsWithConcurrency(
       if (!entry) continue;
       if (Date.now() >= globalDeadline) {
         results[index] = timedOutBucketResult(entry, `research global budget exceeded before ${entry.bucket} could start`);
+        emitProgress(options, {
+          bucket: String(entry.bucket),
+          agent: agentForBucket(String(entry.bucket)),
+          status: "timeout",
+          message: `global budget exceeded before ${entry.bucket} could start`
+        });
         continue;
       }
+      emitProgress(options, {
+        bucket: String(entry.bucket),
+        agent: agentForBucket(String(entry.bucket)),
+        status: "started",
+        message: `starting ${entry.bucket} researcher`
+      });
       results[index] = await runSdkBucket(task, cwd, matrix, entry, options);
+      emitProgress(options, {
+        bucket: results[index].run.bucket,
+        agent: results[index].run.agent,
+        status: results[index].run.status,
+        message: results[index].run.failure_reason || `${entry.bucket} researcher finished`
+      });
     }
   }
 
@@ -403,6 +463,8 @@ async function runBucketsWithConcurrency(
 export async function runResearch(task: string, cwd: string, options: RunResearchOptions = {}): Promise<ResearchReport> {
   const sourceRoot = options.sourceRoot ?? cwd;
   const parts = taskParts(task, options);
+  const runnerMode: ResearchRunnerMode = options.executeSdkResearch ? "sdk_threads" : options.runnerMode ?? "app_handoff";
+  if (runnerMode === "mixed") throw new Error("runnerMode=mixed is a report state created after backfill; use app_handoff, manual_fallback, or sdk_threads.");
   const marker = createHookMarker({
     cwd,
     prompt: parts.rawUserPrompt,
@@ -414,7 +476,28 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     input: options.input ?? {}
   });
 
-  if (options.runnerMode === "manual_fallback") {
+  if (runnerMode === "app_handoff") {
+    const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
+      ...options,
+      turnId: marker.turnId,
+      rawUserPrompt: parts.rawUserPrompt,
+      normalizedTask: parts.normalizedTask,
+      runnerMode: "app_handoff",
+      manualFallbackReason: options.manualFallbackReason ?? DEFAULT_APP_HANDOFF_REASON,
+      subagentStatus: options.subagentStatus ?? "not_loaded",
+      appHandoffRequired: true,
+      sdkThreadsStarted: false,
+      sdkThreadsAllowed: false,
+      subagentInstructionInjected: true,
+      manualBackfillRequired: true
+    });
+    const target = researchReportPath(cwd);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
+    return report;
+  }
+
+  if (runnerMode === "manual_fallback") {
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
       ...options,
       turnId: marker.turnId,
@@ -438,7 +521,10 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
       normalizedTask: parts.normalizedTask,
       runnerMode: "manual_fallback",
       manualFallbackReason: "Codex SDK runner is unavailable.",
-      subagentStatus: "unavailable"
+      subagentStatus: "unavailable",
+      sdkThreadsStarted: false,
+      sdkThreadsAllowed: true,
+      manualBackfillRequired: true
     });
     const target = researchReportPath(cwd);
     mkdirSync(dirname(target), { recursive: true });
@@ -464,6 +550,10 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     normalizedTask: parts.normalizedTask,
     runnerMode: "sdk_threads",
     subagentStatus: "unavailable",
+    sdkThreadsStarted: true,
+    sdkThreadsAllowed: true,
+    appHandoffRequired: false,
+    subagentInstructionInjected: false,
     agentRuns,
     bucketStatuses,
     researcherReports
@@ -487,7 +577,7 @@ export interface ManualSourceInput {
   citation?: string;
 }
 
-function readResearchReport(cwd: string): ResearchReport {
+export function loadResearchReport(cwd: string): ResearchReport {
   const target = researchReportPath(cwd);
   if (!existsSync(target)) throw new Error("research_report.json is missing; run codex-hardflow research first.");
   return JSON.parse(readFileSync(target, "utf8")) as ResearchReport;
@@ -544,7 +634,7 @@ function upsertManualAgentRun(report: ResearchReport, bucket: string, sourceCoun
 }
 
 export function addManualSourceToReport(cwd: string, input: ManualSourceInput): ResearchReport {
-  const report = readResearchReport(cwd);
+  const report = loadResearchReport(cwd);
   const source: ResearchSource = {
     bucket: input.bucket,
     title: input.title,
@@ -556,6 +646,8 @@ export function addManualSourceToReport(cwd: string, input: ManualSourceInput): 
     notes: input.notes ?? "Manual source backfilled after runner execution."
   };
   report.runner_mode = "mixed";
+  report.manual_backfill_required = false;
+  report.app_handoff_required = false;
   report.bucket_statuses[input.bucket] = "manual_backfilled";
   report.searched_sources_table.push(source);
   upsertResearcherReport(report, source);
@@ -564,18 +656,118 @@ export function addManualSourceToReport(cwd: string, input: ManualSourceInput): 
   if (input.citation) report.citations_or_refs.push(input.citation);
   else report.citations_or_refs.push(input.url_or_ref);
   report.source_gaps = report.source_gaps.filter((bucket) => bucket !== input.bucket);
-  report.status = reportStatus(report.bucket_statuses, report.searched_sources_table);
+  report.status = reportStatusForRunner(report.runner_mode, report.bucket_statuses, report.searched_sources_table);
   return writeResearchReport(cwd, report);
 }
 
 export function finalizeManualReport(cwd: string, updates: { usefulFindings?: string[]; conflictingFindings?: string[]; sourceGaps?: string[]; citationsOrRefs?: string[]; confidenceSummary?: string } = {}): ResearchReport {
-  const report = readResearchReport(cwd);
+  const report = loadResearchReport(cwd);
   report.runner_mode = report.searched_sources_table.length > 0 ? "mixed" : report.runner_mode;
+  report.manual_backfill_required = report.searched_sources_table.length === 0;
+  report.app_handoff_required = report.runner_mode === "app_handoff";
   if (updates.usefulFindings) report.useful_findings.push(...updates.usefulFindings);
   if (updates.conflictingFindings) report.conflicting_findings.push(...updates.conflictingFindings);
   if (updates.sourceGaps) report.source_gaps = updates.sourceGaps;
   if (updates.citationsOrRefs) report.citations_or_refs.push(...updates.citationsOrRefs);
   if (updates.confidenceSummary) report.confidence_summary = updates.confidenceSummary;
-  report.status = reportStatus(report.bucket_statuses, report.searched_sources_table);
+  report.status = reportStatusForRunner(report.runner_mode, report.bucket_statuses, report.searched_sources_table);
   return writeResearchReport(cwd, report);
+}
+
+function hasNoSignalEvidence(report: ResearchReport): boolean {
+  return (report.searched_but_no_signal ?? []).length > 0 || Object.values(report.bucket_statuses ?? {}).includes("searched_but_no_signal");
+}
+
+function failureOnlyStatus(status: ResearchBucketStatus | undefined): boolean {
+  return status === "timeout" || status === "failed" || status === "context_exhausted" || status === "manual_fallback";
+}
+
+function sourcesForBucket(report: ResearchReport, bucket: string): ResearchSource[] {
+  return (report.searched_sources_table ?? []).filter((source) => source.bucket === bucket);
+}
+
+function sourceRefSet(report: ResearchReport): Set<string> {
+  const refs = new Set<string>();
+  for (const source of report.searched_sources_table ?? []) {
+    refs.add(source.url_or_ref);
+    refs.add(source.title);
+  }
+  for (const ref of report.citations_or_refs ?? []) refs.add(ref);
+  return refs;
+}
+
+export interface ResearchEvidenceAssertionOptions {
+  finalAnswerSources?: string[];
+  researchHeavy?: boolean;
+}
+
+export function assertResearchReportEvidence(report: ResearchReport, options: ResearchEvidenceAssertionOptions = {}): { passed: boolean; reason?: string } {
+  const requiredBuckets = report.source_matrix?.requiredBuckets?.length
+    ? report.source_matrix.requiredBuckets
+    : report.required_buckets ?? [];
+  const isResearchHeavy = options.researchHeavy ?? /research|troubleshoot|current|solution|architecture|framework/i.test(report.taskType);
+
+  if (report.runner_mode === "app_handoff" && (report.searched_sources_table ?? []).length === 0) {
+    return {
+      passed: false,
+      reason: "app_handoff research_report has no evidence yet. Spawn App subagents or backfill manual sources via codex-hardflow report add-source."
+    };
+  }
+  if (report.runner_mode === "manual_fallback" && (report.searched_sources_table ?? []).length === 0) {
+    return { passed: false, reason: "manual_fallback research_report has no sources. Backfill sources before relying on it." };
+  }
+  const statuses = requiredBuckets.map((bucket) => report.bucket_statuses?.[bucket]);
+  if (report.runner_mode === "sdk_threads" && statuses.length > 0 && statuses.every((status) => status === "timeout")) {
+    return { passed: false, reason: "sdk_threads research_report has all required buckets timed out; require degraded-mode confirmation or manual backfill." };
+  }
+  if (report.status === "failed" || (statuses.length > 0 && statuses.every(failureOnlyStatus))) {
+    return { passed: false, reason: "research_report evidence gate failed: all required buckets are timeout/failed/context_exhausted/manual_fallback without usable evidence." };
+  }
+  if (isResearchHeavy && (report.searched_sources_table ?? []).length === 0) {
+    return { passed: false, reason: "research-heavy report evidence gate failed: searched_sources_table is empty." };
+  }
+  if ((report.useful_findings ?? []).length === 0 && !hasNoSignalEvidence(report)) {
+    return { passed: false, reason: "research_report evidence gate failed: useful_findings is empty and no searched_but_no_signal buckets are recorded." };
+  }
+
+  const criticalBuckets = ["official_docs", "github", "codex_default_discovery"].filter((bucket) => requiredBuckets.includes(bucket));
+  if (
+    criticalBuckets.length > 0 &&
+    criticalBuckets.every((bucket) => failureOnlyStatus(report.bucket_statuses?.[bucket]) && sourcesForBucket(report, bucket).length === 0)
+  ) {
+    return { passed: false, reason: "research_report evidence gate failed: required critical buckets have no usable evidence." };
+  }
+
+  const expectedRefs = options.finalAnswerSources ?? [];
+  if (expectedRefs.length > 0) {
+    const refs = sourceRefSet(report);
+    const missing = expectedRefs.filter((ref) => !refs.has(ref));
+    if (missing.length > 0) {
+      return { passed: false, reason: `final answer references sources missing from research_report: ${missing.join(", ")}` };
+    }
+  }
+
+  return { passed: true };
+}
+
+export function researchReportSummary(cwd: string): Record<string, unknown> {
+  const report = loadResearchReport(cwd);
+  return {
+    path: researchReportPath(cwd),
+    promptHash: report.promptHash,
+    turnId: report.turnId,
+    generatedAt: report.generatedAt,
+    status: report.status,
+    runner_mode: report.runner_mode,
+    app_handoff_required: report.app_handoff_required,
+    sdk_threads_started: report.sdk_threads_started,
+    sdk_threads_allowed: report.sdk_threads_allowed,
+    subagent_instruction_injected: report.subagent_instruction_injected,
+    manual_backfill_required: report.manual_backfill_required,
+    required_buckets: report.required_buckets,
+    bucket_statuses: report.bucket_statuses,
+    searched_sources_count: report.searched_sources_table.length,
+    useful_findings_count: report.useful_findings.length,
+    source_gaps: report.source_gaps
+  };
 }

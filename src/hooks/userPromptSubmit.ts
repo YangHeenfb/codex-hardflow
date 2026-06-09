@@ -88,13 +88,16 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
       `Hardflow marker: turnId=${marker.turnId}, promptHash=${marker.promptHash}, createdAt=${marker.createdAt}, expiresAt=${marker.expiresAt}. Stop gate must only use the marker for this turn/thread.`,
       routing.requiresSourceMatrix
         ? [
-            "This is a research-heavy task. Generate a Source Coverage Matrix and always include codex_default_researcher.",
+            "This is a research-heavy task. Use app_handoff mode for interactive Codex App research.",
+            "Do not synchronously launch Codex SDK researcher threads unless explicitly requested with --runner sdk_threads or --execute-sdk-research.",
+            "Generate or verify .agent/reports/research_report.json in app_handoff mode and always include codex_default_researcher.",
             "Before manual web search, discover/load available multi-agent or subagent capability; if a lazy-loaded tool is required, load it first.",
             `If subagent capability is available, explicitly spawn these source-specific researcher subagents: ${researcherAgents.join(", ")}.`,
-            `If CLI runner is used, run: ${absoluteCommand} research --raw-user-prompt ${JSON.stringify(prompt)} ${JSON.stringify(prompt)}.`,
+            `Safe App handoff command example: ${absoluteCommand} research --runner app_handoff --raw-user-prompt ${JSON.stringify(prompt)} ${JSON.stringify(prompt)}.`,
             "If subagents are unavailable, set subagent_status = unavailable with reason.",
             "If subagents time out, record timeout in research_report.",
-            "Do not silently replace subagents with manual search unless manual results are backfilled into research_report via codex-hardflow report add-source or codex-hardflow report finalize-manual.",
+            "Backfill App/manual/subagent results using official CLI commands: codex-hardflow report add-source and codex-hardflow report finalize-manual.",
+            "Do not use inline internal TypeScript imports to backfill research_report; normal App runs must use the stable CLI.",
             "Do not produce a final answer until .agent/reports/research_report.json exists for this promptHash and contains source_matrix, codex_default_discovery_status, agent_runs, bucket_statuses, and recorded evidence."
           ].join(" ")
         : "",

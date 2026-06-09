@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHookMarker, type HookMarker } from "../src/hookState.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
-import { addManualSourceToReport, buildResearchReport, runResearch } from "../src/researchOrchestrator.js";
+import { addManualSourceToReport, assertResearchReportEvidence, buildResearchReport, runResearch } from "../src/researchOrchestrator.js";
 import { researchReportPath } from "../src/paths.js";
 
 function tempRepo(): string {
@@ -54,6 +54,7 @@ describe("research runner reports", () => {
     const cwd = tempRepo();
     const report = await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),
+      runnerMode: "sdk_threads",
       sdkTimeoutMs: 1,
       input: { turnId: "turn-timeout-runner" },
       sdkPromptRunner: () => new Promise<string>(() => undefined)
@@ -68,6 +69,7 @@ describe("research runner reports", () => {
     const cwd = tempRepo();
     const report = await runResearch("troubleshoot the latest Next.js auth package error", cwd, {
       sourceRoot: process.cwd(),
+      runnerMode: "sdk_threads",
       input: { turnId: "turn-context-exhausted" },
       sdkPromptRunner: async (_prompt, _cwd, bucket) => {
         if (bucket === "package_registry" || bucket === "security") {
@@ -133,6 +135,7 @@ describe("research runner reports", () => {
     const prompt = "research current agent framework choices";
     await runResearch(prompt, cwd, {
       sourceRoot: process.cwd(),
+      runnerMode: "sdk_threads",
       input: { turnId: "turn-manual-backfill" },
       sdkPromptRunner: async (_prompt, _cwd, bucket) => validRunnerJson(bucket)
     });
@@ -170,12 +173,111 @@ describe("research runner reports", () => {
     const prompt = "research current agent framework choices";
     await runResearch(prompt, cwd, {
       sourceRoot: process.cwd(),
+      runnerMode: "sdk_threads",
       sdkTimeoutMs: 1,
       input: { turnId: "turn-all-timeout" },
       sdkPromptRunner: () => new Promise<string>(() => undefined)
     });
 
     expect(stopValidationGate({ cwd, turnId: "turn-all-timeout" }).decision).toBe("block");
+  });
+
+  it("app_handoff initializes a report without starting SDK threads and blocks without evidence", async () => {
+    const cwd = tempRepo();
+    let sdkCalls = 0;
+    const report = await runResearch("research current AI coding agent evaluation approaches", cwd, {
+      sourceRoot: process.cwd(),
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-app-handoff-empty" },
+      sdkPromptRunner: async () => {
+        sdkCalls += 1;
+        return "{}";
+      }
+    });
+
+    expect(report.runner_mode).toBe("app_handoff");
+    expect(report.app_handoff_required).toBe(true);
+    expect(report.sdk_threads_started).toBe(false);
+    expect(report.sdk_threads_allowed).toBe(false);
+    expect(report.subagent_instruction_injected).toBe(true);
+    expect(report.manual_backfill_required).toBe(true);
+    expect(sdkCalls).toBe(0);
+    const gate = stopValidationGate({ cwd, turnId: "turn-app-handoff-empty" });
+    expect(gate.decision).toBe("block");
+    expect(String(gate.reason)).toContain("Spawn App subagents");
+  });
+
+  it("app_handoff with manual_backfilled critical sources passes the Stop gate", async () => {
+    const cwd = tempRepo();
+    const prompt = "research current onboarding patterns for product teams";
+    await runResearch(prompt, cwd, {
+      sourceRoot: process.cwd(),
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-app-handoff-backfilled" }
+    });
+
+    addManualSourceToReport(cwd, {
+      bucket: "official_docs",
+      title: "Official docs",
+      url_or_ref: "https://example.com/docs",
+      claim: "Official documentation was reviewed.",
+      finding: "Official docs provide primary evidence."
+    });
+    addManualSourceToReport(cwd, {
+      bucket: "github",
+      title: "GitHub repo",
+      url_or_ref: "https://github.com/example/repo",
+      claim: "Repository evidence was reviewed.",
+      finding: "GitHub provides implementation evidence."
+    });
+    addManualSourceToReport(cwd, {
+      bucket: "codex_default_discovery",
+      title: "Default discovery",
+      url_or_ref: "https://example.com/default",
+      claim: "Default discovery was reviewed.",
+      finding: "Default discovery adds corroborating evidence."
+    });
+
+    expect(stopValidationGate({ cwd, turnId: "turn-app-handoff-backfilled" }).decision).toBe("allow");
+  });
+
+  it("sdk_threads all-timeout reports fail the evidence assertion", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      runnerMode: "sdk_threads",
+      sdkTimeoutMs: 1,
+      input: { turnId: "turn-assert-all-timeout" },
+      sdkPromptRunner: () => new Promise<string>(() => undefined)
+    });
+
+    expect(assertResearchReportEvidence(report).passed).toBe(false);
+  });
+
+  it("starts SDK threads only when sdk_threads or executeSdkResearch is explicit", async () => {
+    const cwd = tempRepo();
+    let sdkCalls = 0;
+    const defaultReport = await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      input: { turnId: "turn-default-app-handoff" },
+      sdkPromptRunner: async (_prompt, _cwd, bucket) => {
+        sdkCalls += 1;
+        return validRunnerJson(bucket);
+      }
+    });
+    expect(defaultReport.runner_mode).toBe("app_handoff");
+    expect(sdkCalls).toBe(0);
+
+    await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      executeSdkResearch: true,
+      input: { turnId: "turn-explicit-sdk" },
+      sdkPromptRunner: async (_prompt, _cwd, bucket) => {
+        sdkCalls += 1;
+        return validRunnerJson(bucket);
+      }
+    });
+    expect(sdkCalls).toBeGreaterThan(0);
   });
 
   it("Stop gate records timeout-only codex_default_discovery but does not treat it as enough evidence", () => {

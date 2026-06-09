@@ -16,7 +16,8 @@ import { userPromptSubmit } from "./hooks/userPromptSubmit.js";
 import { planParallelModules } from "./parallelOrchestrator.js";
 import { codexHome, privateStoreRoot, skillPathStrategy, validationSummaryPath } from "./paths.js";
 import { runLogprobsProbe } from "./probes/logprobsProbe.js";
-import { addManualSourceToReport, finalizeManualReport, runResearch } from "./researchOrchestrator.js";
+import { addManualSourceToReport, assertResearchReportEvidence, finalizeManualReport, loadResearchReport, researchReportSummary, runResearch } from "./researchOrchestrator.js";
+import type { Confidence, ResearchRunnerMode } from "./schemas.js";
 import { validate } from "./validationOrchestrator.js";
 
 const require = createRequire(import.meta.url);
@@ -55,6 +56,23 @@ function stringFlag(flags: Record<string, string | true>, key: string, required 
   return undefined;
 }
 
+function numberFlag(flags: Record<string, string | true>, key: string): number | undefined {
+  const value = stringFlag(flags, key);
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`Invalid --${key}: ${value}`);
+  return parsed;
+}
+
+function booleanFlag(flags: Record<string, string | true>, key: string): boolean {
+  const value = flags[key];
+  return value === true || value === "true" || value === "1";
+}
+
+function validRunnerMode(value: string | undefined): value is ResearchRunnerMode {
+  return value === "app_handoff" || value === "sdk_threads" || value === "manual_fallback" || value === "mixed";
+}
+
 async function readStdinJson(): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
@@ -65,6 +83,48 @@ async function readStdinJson(): Promise<Record<string, unknown>> {
   } catch {
     return { raw };
   }
+}
+
+async function readOptionalStdinJson(): Promise<Record<string, unknown>> {
+  if (process.stdin.isTTY) return {};
+  return readStdinJson();
+}
+
+function stringField(input: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+function stringArrayField(input: Record<string, unknown>, keys: string[]): string[] | undefined {
+  for (const key of keys) {
+    const value = input[key];
+    if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+    if (typeof value === "string" && value.trim().length > 0) return [value];
+  }
+  return undefined;
+}
+
+function pickString(flags: Record<string, string | true>, input: Record<string, unknown>, flagKeys: string[], jsonKeys: string[], required = false): string | undefined {
+  for (const flag of flagKeys) {
+    const value = stringFlag(flags, flag);
+    if (value) return value;
+  }
+  const value = stringField(input, jsonKeys);
+  if (!value && required) throw new Error(`Missing --${flagKeys[0]}`);
+  return value;
+}
+
+function pickStringArray(flags: Record<string, string | true>, input: Record<string, unknown>, flagKey: string, jsonKeys: string[]): string[] | undefined {
+  const fromFlag = stringFlag(flags, flagKey);
+  const fromJson = stringArrayField(input, jsonKeys) ?? [];
+  return fromFlag ? [...fromJson, fromFlag] : fromJson.length > 0 ? fromJson : undefined;
+}
+
+function sdkProgress(event: { agent: string; bucket: string; status: string; message: string }): void {
+  process.stderr.write(`[codex-hardflow] ${event.agent}/${event.bucket}: ${event.status} - ${event.message}\n`);
 }
 
 export function status(cwd: string, root = sourceRoot): Record<string, unknown> {
@@ -153,42 +213,90 @@ async function main(): Promise<void> {
         const parsed = parseFlagArgs(args);
         const task = parsed.rest.join(" ");
         if (!task) throw new Error("Usage: codex-hardflow research \"task...\"");
-        printJson(await runResearch(task, cwd, { sourceRoot, rawUserPrompt: stringFlag(parsed.flags, "raw-user-prompt") ?? task, normalizedTask: task }));
+        const requestedRunner = stringFlag(parsed.flags, "runner");
+        if (!validRunnerMode(requestedRunner)) {
+          if (requestedRunner) throw new Error(`Invalid --runner: ${requestedRunner}`);
+        }
+        if (requestedRunner === "mixed") throw new Error("--runner mixed is a report state; use app_handoff, manual_fallback, or sdk_threads.");
+        const executeSdkResearch = booleanFlag(parsed.flags, "execute-sdk-research");
+        if (executeSdkResearch && requestedRunner && requestedRunner !== "sdk_threads") {
+          throw new Error("--execute-sdk-research conflicts with non-sdk --runner.");
+        }
+        const runnerMode: ResearchRunnerMode = executeSdkResearch
+          ? "sdk_threads"
+          : validRunnerMode(requestedRunner)
+            ? requestedRunner
+            : "app_handoff";
+        printJson(
+          await runResearch(task, cwd, {
+            sourceRoot,
+            rawUserPrompt: stringFlag(parsed.flags, "raw-user-prompt") ?? task,
+            normalizedTask: task,
+            runnerMode,
+            executeSdkResearch,
+            maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
+            perBucketTimeoutMs: numberFlag(parsed.flags, "per-bucket-timeout"),
+            globalBudgetMs: numberFlag(parsed.flags, "global-budget"),
+            progress: runnerMode === "sdk_threads" ? sdkProgress : undefined
+          })
+        );
         return;
       }
       case "report": {
         const subcommand = args[0];
         const parsed = parseFlagArgs(args.slice(1));
         if (subcommand === "add-source") {
+          const input = await readOptionalStdinJson();
+          const confidence = pickString(parsed.flags, input, ["confidence"], ["confidence"]) as Confidence | undefined;
+          if (confidence && confidence !== "high" && confidence !== "medium" && confidence !== "low") {
+            throw new Error("--confidence must be high, medium, or low.");
+          }
           printJson(
             addManualSourceToReport(cwd, {
-              bucket: stringFlag(parsed.flags, "bucket", true) ?? "",
-              title: stringFlag(parsed.flags, "title", true) ?? "",
-              source_type: stringFlag(parsed.flags, "source-type"),
-              url_or_ref: stringFlag(parsed.flags, "url", true) ?? "",
-              date_or_version: stringFlag(parsed.flags, "date"),
-              claim: stringFlag(parsed.flags, "claim", true) ?? "",
-              confidence: stringFlag(parsed.flags, "confidence") as "high" | "medium" | "low" | undefined,
-              notes: stringFlag(parsed.flags, "notes"),
-              finding: stringFlag(parsed.flags, "finding"),
-              citation: stringFlag(parsed.flags, "citation")
+              bucket: pickString(parsed.flags, input, ["bucket"], ["bucket"], true) ?? "",
+              title: pickString(parsed.flags, input, ["title"], ["title"], true) ?? "",
+              source_type: pickString(parsed.flags, input, ["source-type"], ["source_type", "sourceType"]),
+              url_or_ref: pickString(parsed.flags, input, ["url-or-ref", "url"], ["url_or_ref", "urlOrRef", "url"], true) ?? "",
+              date_or_version: pickString(parsed.flags, input, ["date-or-version", "date"], ["date_or_version", "dateOrVersion", "date"]),
+              claim: pickString(parsed.flags, input, ["claim"], ["claim"], true) ?? "",
+              confidence,
+              notes: pickString(parsed.flags, input, ["notes"], ["notes"]),
+              finding: pickString(parsed.flags, input, ["finding"], ["finding"]),
+              citation: pickString(parsed.flags, input, ["citation"], ["citation"])
             })
           );
           return;
         }
         if (subcommand === "finalize-manual") {
+          const input = await readOptionalStdinJson();
           printJson(
             finalizeManualReport(cwd, {
-              usefulFindings: stringFlag(parsed.flags, "useful-finding") ? [stringFlag(parsed.flags, "useful-finding") ?? ""] : undefined,
-              conflictingFindings: stringFlag(parsed.flags, "conflicting-finding") ? [stringFlag(parsed.flags, "conflicting-finding") ?? ""] : undefined,
-              sourceGaps: stringFlag(parsed.flags, "source-gap") ? [stringFlag(parsed.flags, "source-gap") ?? ""] : undefined,
-              citationsOrRefs: stringFlag(parsed.flags, "citation") ? [stringFlag(parsed.flags, "citation") ?? ""] : undefined,
-              confidenceSummary: stringFlag(parsed.flags, "confidence-summary")
+              usefulFindings: pickStringArray(parsed.flags, input, "useful-finding", ["usefulFindings", "useful_findings"]),
+              conflictingFindings: pickStringArray(parsed.flags, input, "conflicting-finding", ["conflictingFindings", "conflicting_findings"]),
+              sourceGaps: pickStringArray(parsed.flags, input, "source-gap", ["sourceGaps", "source_gaps"]),
+              citationsOrRefs: pickStringArray(parsed.flags, input, "citation", ["citationsOrRefs", "citations_or_refs"]),
+              confidenceSummary: pickString(parsed.flags, input, ["confidence-summary"], ["confidenceSummary", "confidence_summary"])
             })
           );
           return;
         }
-        throw new Error("Usage: codex-hardflow report add-source --bucket <bucket> --title <title> --url <url> --claim <claim>");
+        if (subcommand === "status") {
+          printJson(researchReportSummary(cwd));
+          return;
+        }
+        if (subcommand === "show") {
+          printJson(loadResearchReport(cwd));
+          return;
+        }
+        if (subcommand === "assert-evidence") {
+          const input = await readOptionalStdinJson();
+          const finalAnswerSources = pickStringArray(parsed.flags, input, "final-answer-source", ["finalAnswerSources", "final_answer_sources"]);
+          const result = assertResearchReportEvidence(loadResearchReport(cwd), { finalAnswerSources });
+          printJson(result);
+          if (!result.passed) process.exitCode = 1;
+          return;
+        }
+        throw new Error("Usage: codex-hardflow report <add-source|finalize-manual|status|show|assert-evidence>");
       }
       case "implement": {
         const task = args.join(" ");
@@ -258,9 +366,12 @@ async function main(): Promise<void> {
         printJson({
           usage: [
             "codex-hardflow status",
-            "codex-hardflow research \"task...\"",
+            "codex-hardflow research [--runner app_handoff|sdk_threads|manual_fallback] [--execute-sdk-research] \"task...\"",
             "codex-hardflow report add-source --bucket <bucket> --title <title> --url <url> --claim <claim>",
             "codex-hardflow report finalize-manual [--useful-finding text]",
+            "codex-hardflow report status",
+            "codex-hardflow report show",
+            "codex-hardflow report assert-evidence",
             "codex-hardflow implement \"task...\"",
             "codex-hardflow validate",
             "codex-hardflow probe-logprobs",
