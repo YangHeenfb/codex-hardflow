@@ -1,0 +1,7 @@
+{
+  "max_repair_cycles": 3,
+  "fresh_cases_per_cycle": 5,
+  "min_holdout_cases": 5,
+  "rerun_regression_bank": true,
+  "stop_on_suspected_cheating": true
+}

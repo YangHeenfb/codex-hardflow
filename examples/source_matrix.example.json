@@ -1,0 +1,4 @@
+{
+  "task": "compare current agent frameworks",
+  "requiredBuckets": ["official_docs", "github", "community", "academic", "package_registry", "blogs_engineering", "competitors", "codex_default_discovery"]
+}

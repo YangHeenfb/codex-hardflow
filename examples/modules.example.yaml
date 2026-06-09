@@ -1,0 +1,11 @@
+task: "Implement independent modules"
+shared_contract_paths: ["src/shared"]
+modules:
+  - id: "api"
+    prompt: "Implement API changes"
+    path_scope: ["src/api", "tests/api"]
+    test_command: "npm test -- tests/api"
+  - id: "ui"
+    prompt: "Implement UI changes"
+    path_scope: ["src/ui", "tests/ui"]
+    test_command: "npm test -- tests/ui"

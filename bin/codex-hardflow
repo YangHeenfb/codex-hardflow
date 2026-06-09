@@ -1,0 +1,24 @@
+#!/usr/bin/env node
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = dirname(here);
+const distCli = join(root, "dist", "cli.js");
+const srcCli = join(root, "src", "cli.ts");
+
+if (existsSync(distCli)) {
+  await import(pathToFileURL(distCli).href);
+} else if (process.env.CODEX_HARDFLOW_DEV === "1" && existsSync(srcCli)) {
+  const child = spawnSync("npx", ["tsx", srcCli, ...process.argv.slice(2)], {
+    cwd: root,
+    stdio: "inherit",
+    env: process.env
+  });
+  process.exit(child.status ?? 1);
+} else {
+  console.error("codex-hardflow is not built. Run `npm run build` in the source repository first.");
+  process.exit(1);
+}

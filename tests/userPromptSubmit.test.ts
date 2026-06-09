@@ -1,0 +1,60 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
+import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
+
+function additionalContext(result: Record<string, unknown>): string {
+  return String((result.hookSpecificOutput as Record<string, unknown> | undefined)?.additionalContext ?? "");
+}
+
+describe("UserPromptSubmit research-heavy injection", () => {
+  beforeEach(() => {
+    process.env.CODEX_HARDFLOW_HOME = mkdtempSync(join(tmpdir(), "hardflow-state-"));
+  });
+
+  it("triggers research-heavy marker without explicit codex-hardflow mention", () => {
+    const result = userPromptSubmit(
+      {
+        cwd: process.cwd(),
+        prompt: "What are current best practices for AI agent framework evaluation?",
+        turnId: "turn-userprompt-research"
+      },
+      process.cwd()
+    );
+
+    expect(result.decision).toBe("allow");
+    expect((result.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
+    expect(result).not.toHaveProperty("additionalContext");
+    expect(additionalContext(result)).toContain("This is a research-heavy task");
+    expect(additionalContext(result)).toContain("discover/load available multi-agent or subagent capability");
+    expect(additionalContext(result)).toContain("official_docs_researcher");
+    expect(additionalContext(result)).toContain("codex_default_researcher");
+    expect(additionalContext(result)).toContain("agent_runs");
+    expect(additionalContext(result)).toContain("bucket_statuses");
+    expect(additionalContext(result)).toContain("codex-hardflow report add-source");
+  });
+
+  it("injects local_repo and competitor researchers for current-project comparison prompts", () => {
+    const result = userPromptSubmit(
+      {
+        cwd: process.cwd(),
+        prompt: "我这个项目有什么类似产品/项目？有哪些可以吸收改进的？",
+        turnId: "turn-userprompt-local-competitors"
+      },
+      process.cwd()
+    );
+
+    expect(additionalContext(result)).toContain("local_repo_researcher");
+    expect(additionalContext(result)).toContain("competitor_researcher");
+  });
+
+  it("does not overblock simple or bypassed prompts", () => {
+    const simple = userPromptSubmit({ prompt: "translate hello to Chinese" }, process.cwd());
+    expect(simple.decision).toBe("allow");
+    expect((simple.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
+    const bypass = userPromptSubmit({ prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd());
+    expect(bypass.decision).toBe("allow");
+    expect(additionalContext(bypass)).toContain("bypass marker");
+  });
+});

@@ -1,0 +1,205 @@
+export const SOURCE_BUCKETS = [
+  "official_docs",
+  "github",
+  "community",
+  "academic",
+  "package_registry",
+  "security",
+  "blogs_engineering",
+  "competitors",
+  "local_repo",
+  "private_connectors",
+  "codex_default_discovery"
+] as const;
+
+export type SourceBucket = (typeof SOURCE_BUCKETS)[number];
+export type Confidence = "high" | "medium" | "low";
+export type ValidationStatus = "passed" | "failed" | "blocked" | "not_configured";
+export type CodexDefaultDiscoveryStatus = "completed" | "timeout" | "failed" | "not_configured";
+export type ResearchRunnerMode = "subagents" | "sdk_threads" | "manual_fallback" | "mixed";
+export type ResearchReportStatus = "completed" | "degraded" | "failed";
+export type ResearchBucketStatus = "completed" | "searched_but_no_signal" | "failed" | "timeout" | "manual_fallback" | "manual_backfilled" | "context_exhausted";
+export type ResearchAgentRunStatus = "completed" | "failed" | "timeout" | "spawn_failed" | "context_exhausted" | "manual_fallback";
+
+export interface TaskClassification {
+  researchHeavy: boolean;
+  solutionFinding: boolean;
+  currentState: boolean;
+  troubleshooting: boolean;
+  architectureChoice: boolean;
+  frameworkChoice: boolean;
+  implementation: boolean;
+  validationSensitive: boolean;
+  parallelModules: boolean;
+  privateConnectorsExplicit: boolean;
+  securityRelevant: boolean;
+  academicRelevant: boolean;
+  packageRelevant: boolean;
+  competitorRelevant: boolean;
+  agentRelevant: boolean;
+  evaluationRelevant: boolean;
+  productionRelevant: boolean;
+  localRepoRelevant: boolean;
+}
+
+export interface SourceMatrixEntry {
+  bucket: SourceBucket | string;
+  required: boolean;
+  reason: string;
+  querySeeds: string[];
+  searchedAtLeastOnce: boolean;
+  searchedButNoSignal?: boolean;
+}
+
+export interface SourceCoverageMatrix {
+  task: string;
+  rawUserPrompt?: string;
+  normalizedTask?: string;
+  classificationInput?: string;
+  generatedAt: string;
+  classification: TaskClassification;
+  entries: SourceMatrixEntry[];
+  requiredBuckets: string[];
+  promptInjectionCaution: string;
+}
+
+export interface ResearchSource {
+  bucket?: string;
+  title: string;
+  source_type: string;
+  url_or_ref: string;
+  date_or_version: string;
+  claim: string;
+  confidence: Confidence;
+  notes: string;
+}
+
+export interface ResearcherReport {
+  bucket: string;
+  queries_run: string[];
+  sources_found: ResearchSource[];
+  searched_but_no_signal: boolean;
+  uncertainties: string[];
+  recommended_followups: string[];
+}
+
+export interface ResearchAgentRun {
+  agent: string;
+  bucket: string;
+  status: ResearchAgentRunStatus;
+  startedAt: string;
+  endedAt: string;
+  queries_run: string[];
+  sources_found_count: number;
+  searched_but_no_signal: boolean;
+  failure_reason: string;
+  fallback_used: boolean;
+}
+
+export interface ResearchReport {
+  task: string;
+  rawUserPrompt: string;
+  normalizedTask: string;
+  classificationInput: string;
+  promptHash: string;
+  turnId: string;
+  generatedAt: string;
+  taskType: string;
+  status: ResearchReportStatus;
+  runner_mode: ResearchRunnerMode;
+  manual_fallback_reason?: string;
+  subagent_status?: "available" | "unavailable" | "not_loaded" | "failed";
+  source_matrix: SourceCoverageMatrix;
+  required_buckets: string[];
+  bucket_statuses: Record<string, ResearchBucketStatus>;
+  agent_runs: ResearchAgentRun[];
+  researcher_reports: ResearcherReport[];
+  searched_sources_table: ResearchSource[];
+  searched_but_no_signal: string[];
+  codex_default_discovery_status: CodexDefaultDiscoveryStatus;
+  codex_default_discovery_findings: {
+    unexpected_source_buckets: string[];
+    followup_recommendations: string[];
+  };
+  useful_findings: string[];
+  conflicting_findings: string[];
+  source_gaps: string[];
+  confidence_summary: string;
+  citations_or_refs: string[];
+  prompt_injection_notes: string[];
+}
+
+export interface PublicTestCaseSummary {
+  file: string;
+  case_name: string;
+  purpose: string;
+  inputs_summary: string;
+  expected_behavior_summary: string;
+}
+
+export interface ExecutorManifest {
+  task_id: string;
+  changed_files: string[];
+  implementation_summary: string;
+  assumptions: string[];
+  public_tests_added: PublicTestCaseSummary[];
+  public_tests_run: string[];
+  manual_checks: string[];
+  case_coverage_summary: {
+    covered_equivalence_classes: string[];
+    covered_boundaries: string[];
+    covered_error_paths: string[];
+    not_covered: string[];
+  };
+  risk_areas: string[];
+  known_limitations: string[];
+}
+
+export interface ValidationCategory {
+  category: string;
+  severity: "low" | "medium" | "high" | "critical";
+  public_spec_reference: string;
+  summary: string;
+  public_hint: string;
+  likely_affected_area: string;
+  leakage_risk_checked: boolean;
+}
+
+export interface ValidationSummary {
+  validation_id: string;
+  iteration: number;
+  status: ValidationStatus;
+  public_status: "passed" | "failed" | "not_run";
+  hidden_status: "passed" | "failed" | "not_configured" | "blocked";
+  final_holdout_status: "passed" | "failed" | "not_run";
+  failed_count: number;
+  categories: ValidationCategory[];
+  executor_manifest_read: boolean;
+  hidden_tests_disclosed: false;
+  regression_bank_updated: boolean;
+  fresh_cases_generated: boolean;
+  repair_loop_next_action: "repair" | "stop" | "holdout" | "done";
+  next_repair_prompt: string;
+}
+
+export interface LoopConfig {
+  max_repair_cycles: number;
+  fresh_cases_per_cycle: number;
+  min_holdout_cases: number;
+  rerun_regression_bank: boolean;
+  stop_on_suspected_cheating: boolean;
+}
+
+export interface ModuleSpec {
+  id: string;
+  prompt: string;
+  path_scope: string[];
+  test_command?: string;
+  dependencies: string[];
+}
+
+export interface ModulesFile {
+  task: string;
+  modules: ModuleSpec[];
+  shared_contract_paths: string[];
+}

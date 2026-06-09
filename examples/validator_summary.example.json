@@ -1,0 +1,16 @@
+{
+  "validation_id": "example",
+  "iteration": 0,
+  "status": "not_configured",
+  "public_status": "not_run",
+  "hidden_status": "not_configured",
+  "final_holdout_status": "not_run",
+  "failed_count": 0,
+  "categories": [],
+  "executor_manifest_read": true,
+  "hidden_tests_disclosed": false,
+  "regression_bank_updated": false,
+  "fresh_cases_generated": false,
+  "repair_loop_next_action": "done",
+  "next_repair_prompt": "Hidden validator is not configured; do not claim hidden validation coverage."
+}

@@ -1,0 +1,17 @@
+{
+  "task_id": "example",
+  "changed_files": ["src/example.ts"],
+  "implementation_summary": "Example implementation summary.",
+  "assumptions": [],
+  "public_tests_added": [],
+  "public_tests_run": ["npm test"],
+  "manual_checks": [],
+  "case_coverage_summary": {
+    "covered_equivalence_classes": [],
+    "covered_boundaries": [],
+    "covered_error_paths": [],
+    "not_covered": ["malformed input"]
+  },
+  "risk_areas": ["boundary behavior"],
+  "known_limitations": []
+}

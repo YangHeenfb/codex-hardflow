@@ -1,0 +1,48 @@
+{
+  "name": "codex-hardflow",
+  "version": "0.1.0",
+  "description": "Global Codex hardflow harness for coverage-first research and isolated validation loops.",
+  "main": "dist/index.js",
+  "exports": "./dist/index.js",
+  "bin": {
+    "codex-hardflow": "./bin/codex-hardflow"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsx src/cli.ts",
+    "hardflow": "tsx src/cli.ts",
+    "verify": "npm run build && npm test && node dist/cli.js verify:self"
+  },
+  "keywords": [
+    "codex",
+    "agents",
+    "validation",
+    "research"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "docs/",
+    "examples/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md"
+  ],
+  "dependencies": {
+    "@openai/codex-sdk": "0.134.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
