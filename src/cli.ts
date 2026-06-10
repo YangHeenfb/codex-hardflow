@@ -19,7 +19,19 @@ import { userPromptSubmit } from "./hooks/userPromptSubmit.js";
 import { planParallelModules } from "./parallelOrchestrator.js";
 import { codexHome, privateStoreRoot, skillPathStrategy, validationSummaryPath } from "./paths.js";
 import { runLogprobsProbe } from "./probes/logprobsProbe.js";
-import { addManualSourceToReport, addSubagentReport, assertResearchReportEvidence, finalizeManualReport, loadResearchReport, mergeSubagentReports, researchReportSummary, runResearch } from "./researchOrchestrator.js";
+import {
+  addManualSourceToReport,
+  addSubagentReport,
+  assertResearchReportEvidence,
+  cancelResearchWorker,
+  finalizeManualReport,
+  listResearchWorkers,
+  loadResearchReport,
+  mergeSubagentReports,
+  researchReportSummary,
+  resumeResearchRun,
+  runResearch
+} from "./researchOrchestrator.js";
 import { runLlmRouter } from "./router/llmRouter.js";
 import type { RouterTraceOwner } from "./router/routerSchema.js";
 import type { Confidence, ResearchRunnerMode, ResearchSource, SubagentReportStatus } from "./schemas.js";
@@ -274,6 +286,36 @@ async function main(): Promise<void> {
         return;
       }
       case "research": {
+        const researchSubcommand = args[0];
+        if (researchSubcommand === "resume") {
+          const parsed = parseFlagArgs(args.slice(1));
+          printJson(
+            await resumeResearchRun(cwd, stringFlag(parsed.flags, "run-id", true) ?? "", {
+              maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
+              workerLeaseMs: numberFlag(parsed.flags, "worker-lease"),
+              softTimeoutMs: numberFlag(parsed.flags, "soft-timeout"),
+              hardTimeoutMs: numberFlag(parsed.flags, "hard-timeout"),
+              globalBudgetMs: numberFlag(parsed.flags, "global-budget"),
+              heartbeatIntervalMs: numberFlag(parsed.flags, "heartbeat-interval"),
+              maxNoProgressHeartbeats: numberFlag(parsed.flags, "max-no-progress-heartbeats"),
+              maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker")
+            })
+          );
+          return;
+        }
+        if (researchSubcommand === "workers") {
+          const parsed = parseFlagArgs(args.slice(1));
+          printJson({
+            runId: stringFlag(parsed.flags, "run-id", true),
+            workers: listResearchWorkers(cwd, stringFlag(parsed.flags, "run-id", true) ?? "")
+          });
+          return;
+        }
+        if (researchSubcommand === "cancel") {
+          const parsed = parseFlagArgs(args.slice(1));
+          printJson(cancelResearchWorker(cwd, stringFlag(parsed.flags, "run-id", true) ?? "", stringFlag(parsed.flags, "bucket", true) ?? ""));
+          return;
+        }
         const parsed = parseFlagArgs(args);
         const task = parsed.rest.join(" ");
         if (!task) throw new Error("Usage: codex-hardflow research \"task...\"");
@@ -305,8 +347,14 @@ async function main(): Promise<void> {
             strictProgrammatic,
             runRouter: booleanFlag(parsed.flags, "run-router"),
             maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
+            workerLeaseMs: numberFlag(parsed.flags, "worker-lease"),
+            softTimeoutMs: numberFlag(parsed.flags, "soft-timeout"),
+            hardTimeoutMs: numberFlag(parsed.flags, "hard-timeout"),
             perBucketTimeoutMs: numberFlag(parsed.flags, "per-bucket-timeout"),
             globalBudgetMs: numberFlag(parsed.flags, "global-budget"),
+            heartbeatIntervalMs: numberFlag(parsed.flags, "heartbeat-interval"),
+            maxNoProgressHeartbeats: numberFlag(parsed.flags, "max-no-progress-heartbeats"),
+            maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
             progress: runnerMode === "sdk_threads" ? sdkProgress : undefined
           })
         );
@@ -498,7 +546,10 @@ async function main(): Promise<void> {
             "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff --run-router \"task...\"",
-            "codex-hardflow research --run-id <runId> --strict-programmatic \"task...\"",
+            "codex-hardflow research --run-id <runId> --strict-programmatic [--max-sources-per-worker <n>] \"task...\"",
+            "codex-hardflow research resume --run-id <runId>",
+            "codex-hardflow research workers --run-id <runId>",
+            "codex-hardflow research cancel --run-id <runId> --bucket <bucket>",
             "research reuses an existing parent router_trace for the same runId by default; --run-router explicitly reruns router; --write-trace is boolean and does not consume task text.",
             "codex-hardflow report add-source [--run-id <runId>] --bucket <bucket> --title <title> --url <url> --claim <claim>",
             "codex-hardflow report finalize-manual [--run-id <runId>] [--useful-finding text]",

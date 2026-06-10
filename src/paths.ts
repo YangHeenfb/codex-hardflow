@@ -107,6 +107,30 @@ export function researchRunSubagentsDir(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "subagents");
 }
 
+export function researchRunSdkThreadsDir(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "sdk_threads");
+}
+
+export function researchRunSdkWorkerDir(cwd: string, runId: string, bucket: string): string {
+  return join(researchRunSdkThreadsDir(cwd, runId), safeReportSegment(bucket));
+}
+
+export function researchRunSdkWorkerStatePath(cwd: string, runId: string, bucket: string): string {
+  return join(researchRunSdkWorkerDir(cwd, runId, bucket), "worker_state.json");
+}
+
+export function researchRunSdkWorkerPartialEvidencePath(cwd: string, runId: string, bucket: string): string {
+  return join(researchRunSdkWorkerDir(cwd, runId, bucket), "partial_evidence.jsonl");
+}
+
+export function researchRunSdkWorkerCheckpointsDir(cwd: string, runId: string, bucket: string): string {
+  return join(researchRunSdkWorkerDir(cwd, runId, bucket), "checkpoints");
+}
+
+export function researchRunSdkWorkerFinalReportPath(cwd: string, runId: string, bucket: string): string {
+  return join(researchRunSdkWorkerDir(cwd, runId, bucket), "final_report.json");
+}
+
 export function researchSubagentReportPath(cwd: string, runId: string, agent: string, bucket: string): string {
   return join(researchRunSubagentsDir(cwd, runId), `${safeReportSegment(agent)}-${safeReportSegment(bucket)}.json`);
 }

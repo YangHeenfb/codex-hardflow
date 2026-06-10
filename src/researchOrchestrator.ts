@@ -4,6 +4,20 @@ import { codexRunnerStatus, runIsolatedCodexPrompt } from "./codexRunner.js";
 import { buildCoveragePlan, maybeLoadCoveragePlan, writeCoveragePlan, type CoveragePlan } from "./coverage/coveragePlan.js";
 import { addEvidence, perspectiveForBucket, researchQuestionForBucket } from "./coverage/evidenceLedger.js";
 import { appendHookEvent } from "./hookEvents.js";
+import {
+  cancelSdkWorker,
+  listSdkWorkerStates,
+  runSdkResearchPool,
+  type SdkResearchStepRunner,
+  type SdkResearchPoolResult,
+  DEFAULT_SDK_GLOBAL_BUDGET_MS,
+  DEFAULT_SDK_HARD_TIMEOUT_MS,
+  DEFAULT_SDK_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_SDK_MAX_CONCURRENT_BUCKETS,
+  DEFAULT_SDK_MAX_NO_PROGRESS_HEARTBEATS,
+  DEFAULT_SDK_SOFT_TIMEOUT_MS,
+  DEFAULT_SDK_WORKER_LEASE_MS
+} from "./research/sdkResearchRunner.js";
 import { buildSourceCoverageMatrix, applyDefaultDiscoveryFindings } from "./sourceMatrix.js";
 import { runLlmRouter } from "./router/llmRouter.js";
 import { routerFailedOutput } from "./router/routerFallback.js";
@@ -18,6 +32,8 @@ import type {
   ResearchReportOwner,
   ResearcherReport,
   ResearchRunnerMode,
+  SdkWorkerPoolStatus,
+  SdkWorkerRun,
   SubagentStatus,
   SubagentTriggerSource,
   ResearchSource,
@@ -67,6 +83,9 @@ export interface BuildResearchReportOptions {
   agentRuns?: ResearchAgentRun[];
   bucketStatuses?: Record<string, ResearchBucketStatus>;
   researcherReports?: ResearcherReport[];
+  sdkWorkerStatus?: SdkWorkerPoolStatus;
+  sdkWorkerRuns?: SdkWorkerRun[];
+  appSubagentStatus?: ResearchReport["app_subagent_status"];
 }
 
 export interface RunResearchOptions extends BuildResearchReportOptions {
@@ -81,8 +100,15 @@ export interface RunResearchOptions extends BuildResearchReportOptions {
   sdkTimeoutMs?: number;
   perBucketTimeoutMs?: number;
   maxConcurrentBuckets?: number;
+  workerLeaseMs?: number;
+  softTimeoutMs?: number;
+  hardTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
+  maxNoProgressHeartbeats?: number;
+  maxSourcesPerWorker?: number;
   globalBudgetMs?: number;
   sdkPromptRunner?: (prompt: string, cwd: string, bucket: string) => Promise<string>;
+  sdkStepRunner?: SdkResearchStepRunner;
   defaultDiscoveryBuckets?: string[];
   progress?: (event: ResearchProgressEvent) => void;
 }
@@ -277,7 +303,7 @@ function manualBackfillRequiredFor(runnerMode: ResearchRunnerMode, status: Resea
 
 function defaultSubagentStatus(runnerMode: ResearchRunnerMode, options: BuildResearchReportOptions): SubagentStatus {
   if (options.subagentStatus) return options.subagentStatus;
-  if (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic") return "spawned";
+  if (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic") return "not_applicable";
   if (runnerMode === "app_handoff") return "not_spawned";
   return "not_applicable";
 }
@@ -362,6 +388,9 @@ export function buildResearchReport(
     evidence_mode: evidenceMode,
     failure_reason: options.failureReason,
     strict_programmatic: options.strictProgrammatic,
+    sdk_worker_status: options.sdkWorkerStatus,
+    sdk_worker_runs: options.sdkWorkerRuns,
+    app_subagent_status: options.appSubagentStatus ?? (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic" ? "not_applicable" : runnerMode === "app_handoff" ? "not_spawned" : undefined),
     app_handoff_required: options.appHandoffRequired ?? runnerMode === "app_handoff",
     sdk_threads_started: options.sdkThreadsStarted ?? runnerMode === "sdk_threads",
     sdk_threads_allowed: options.sdkThreadsAllowed ?? runnerMode === "sdk_threads",
@@ -618,6 +647,127 @@ async function runBucketsWithConcurrency(
 
   await Promise.all(Array.from({ length: Math.min(maxConcurrent, sorted.length) }, () => worker()));
   return results.filter((result): result is { run: ResearchAgentRun; report: ResearcherReport } => result !== undefined);
+}
+
+function legacyStepRunner(options: RunResearchOptions): SdkResearchStepRunner | undefined {
+  if (options.sdkStepRunner) return options.sdkStepRunner;
+  if (!options.sdkPromptRunner) return undefined;
+  return async ({ prompt, cwd, bucket }) => options.sdkPromptRunner?.(prompt, cwd, bucket) ?? "{}";
+}
+
+function bucketStatusFromSdkWorker(worker: SdkWorkerRun, report: ResearcherReport): ResearchBucketStatus {
+  if (report.sources_found.length > 0) return "completed";
+  if (report.searched_but_no_signal) return "searched_but_no_signal";
+  if (worker.status === "timeout" || worker.status === "needs_resume") return "timeout";
+  if (/context|token|exhaust/i.test(worker.failure_reason)) return "context_exhausted";
+  return "failed";
+}
+
+function bucketStatusesFromSdkPool(requiredBuckets: string[], pool: SdkResearchPoolResult): Record<string, ResearchBucketStatus> {
+  const reports = new Map(pool.researcherReports.map((report) => [report.bucket, report]));
+  const statuses: Record<string, ResearchBucketStatus> = {};
+  for (const worker of pool.workerRuns) {
+    statuses[worker.bucket] = bucketStatusFromSdkWorker(worker, reports.get(worker.bucket) ?? {
+      bucket: worker.bucket,
+      queries_run: [],
+      sources_found: [],
+      searched_but_no_signal: false,
+      uncertainties: [],
+      recommended_followups: []
+    });
+  }
+  for (const bucket of requiredBuckets) {
+    if (!statuses[bucket]) statuses[bucket] = "failed";
+  }
+  return normalizeBucketStatuses(requiredBuckets, statuses);
+}
+
+function sdkReportStatus(runnerMode: ResearchRunnerMode, pool: SdkResearchPoolResult, report: ResearchReport, plan: CoveragePlan): ResearchReport["status"] {
+  const requiredBuckets = plan.sourceBuckets.filter((bucket) => bucket.required).map((bucket) => bucket.bucket);
+  const criticalBuckets = plan.sourceBuckets.filter((bucket) => bucket.required && bucket.priority === "critical").map((bucket) => bucket.bucket);
+  const evidenceBuckets = new Set([
+    ...report.searched_sources_table.map((source) => source.bucket).filter((bucket): bucket is string => Boolean(bucket)),
+    ...report.searched_but_no_signal
+  ]);
+  const evidenceGatePassed = requiredBuckets.length > 0 && requiredBuckets.every((bucket) => evidenceBuckets.has(bucket));
+  const allCriticalFailed =
+    criticalBuckets.length > 0 &&
+    criticalBuckets.every((bucket) => {
+      const status = report.bucket_statuses[bucket];
+      return (status === "failed" || status === "timeout" || status === "context_exhausted") && !evidenceBuckets.has(bucket);
+    });
+  const allRequiredFailed =
+    requiredBuckets.length > 0 &&
+    requiredBuckets.every((bucket) => {
+      const status = report.bucket_statuses[bucket];
+      return (status === "failed" || status === "timeout" || status === "context_exhausted") && !evidenceBuckets.has(bucket);
+    });
+  if (runnerMode === "strict_programmatic" && (pool.workerRuns.length === 0 || allCriticalFailed || allRequiredFailed || pool.sdk_worker_status === "failed")) return "failed";
+  if (runnerMode === "strict_programmatic" && evidenceGatePassed && pool.sdk_worker_status === "completed") return "completed";
+  if (runnerMode === "strict_programmatic" && evidenceGatePassed && pool.sdk_worker_status === "degraded") return "degraded";
+  if (pool.sdk_worker_status === "completed") return report.searched_sources_table.length > 0 || report.searched_but_no_signal.length > 0 ? "completed" : "failed";
+  if (pool.sdk_worker_status === "failed") return "failed";
+  return "degraded";
+}
+
+function applySdkReportFindings(report: ResearchReport, pool: SdkResearchPoolResult): void {
+  const claims = new Set<string>();
+  const refs = new Set<string>();
+  for (const source of pool.researcherReports.flatMap((item) => item.sources_found)) {
+    if (source.claim) claims.add(source.claim);
+    if (source.url_or_ref) refs.add(source.url_or_ref);
+  }
+  report.useful_findings = [...new Set([...report.useful_findings, ...claims])];
+  report.citations_or_refs = [...new Set([...report.citations_or_refs, ...refs])];
+}
+
+function mergeSdkPoolIntoReport(cwd: string, report: ResearchReport, pool: SdkResearchPoolResult, plan: CoveragePlan): ResearchReport {
+  const reportByBucket = new Map(report.researcher_reports.map((item) => [item.bucket, item]));
+  for (const sdkReport of pool.researcherReports) {
+    reportByBucket.set(sdkReport.bucket, sdkReport);
+  }
+  report.researcher_reports = [...reportByBucket.values()];
+
+  const runKey = (run: ResearchAgentRun) => `${run.agent}\u0000${run.bucket}\u0000${run.fallback_used}`;
+  const runByKey = new Map(report.agent_runs.map((run) => [runKey(run), run]));
+  for (const sdkRun of pool.agentRuns) runByKey.set(runKey(sdkRun), sdkRun);
+  report.agent_runs = [...runByKey.values()];
+
+  const workerByBucket = new Map((report.sdk_worker_runs ?? []).map((run) => [run.bucket, run]));
+  for (const worker of pool.workerRuns) workerByBucket.set(worker.bucket, worker);
+  report.sdk_worker_runs = [...workerByBucket.values()];
+  report.sdk_worker_status = pool.sdk_worker_status;
+  report.programmaticMultiAgent = report.sdk_worker_runs.length > 0;
+  report.sdk_threads_started = report.sdk_worker_runs.length > 0;
+  report.sdk_threads_allowed = true;
+  report.subagent_status = "not_applicable";
+  report.subagent_trigger_source = "sdk_threads";
+  report.subagent_skip_reason = "SDK worker pool was used; no App subagent spawn was recorded.";
+  report.app_subagent_status = "not_applicable";
+
+  const existingSources = new Set(report.searched_sources_table.map(sourceKey));
+  for (const source of pool.researcherReports.flatMap((item) => item.sources_found.map((source) => ({ ...source, bucket: source.bucket ?? item.bucket })))) {
+    if (existingSources.has(sourceKey(source))) continue;
+    existingSources.add(sourceKey(source));
+    report.searched_sources_table.push(source);
+  }
+
+  const nextStatuses = bucketStatusesFromSdkPool(report.required_buckets, pool);
+  for (const [bucket, status] of Object.entries(nextStatuses)) {
+    if (shouldReplaceBucketStatus(report.bucket_statuses[bucket], status)) report.bucket_statuses[bucket] = status;
+  }
+  for (const sdkReport of pool.researcherReports) {
+    if (sdkReport.searched_but_no_signal && !report.searched_but_no_signal.includes(sdkReport.bucket)) {
+      report.searched_but_no_signal.push(sdkReport.bucket);
+    }
+  }
+
+  report.evidence_mode = report.evidence_mode && report.evidence_mode !== "none" && report.evidence_mode !== "sdk_threads" ? "mixed" : "sdk_threads";
+  report.status = sdkReportStatus(report.runner_mode, pool, report, plan);
+  report.manual_backfill_required = report.status !== "completed";
+  report.source_gaps = report.required_buckets.filter((bucket) => report.bucket_statuses[bucket] !== "completed" && report.bucket_statuses[bucket] !== "searched_but_no_signal");
+  applySdkReportFindings(report, pool);
+  return writeResearchReport(cwd, report);
 }
 
 function writeRunMetadata(cwd: string, report: ResearchReport): void {
@@ -937,8 +1087,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     matrix = applyDefaultDiscoveryFindings(matrix, options.defaultDiscoveryBuckets);
   }
   const requiredEntries = matrix.entries.filter((entry) => entry.required);
-  const results = await runBucketsWithConcurrency(task, cwd, matrix, requiredEntries, options);
-  if (runnerMode === "strict_programmatic" && results.length === 0) {
+  if (runnerMode === "strict_programmatic" && requiredEntries.length === 0) {
     const failureReason = "strict_programmatic started zero workers";
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "failed", {
       ...options,
@@ -968,10 +1117,60 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     report.source_gaps = strictRequiredBuckets;
     return writeParentResearchReport(cwd, report, true);
   }
-  const agentRuns = results.map((result) => result.run);
-  const researcherReports = results.map((result) => result.report);
   const requiredBuckets = requiredEntries.map((entry) => String(entry.bucket));
-  const bucketStatuses = normalizeBucketStatuses(requiredBuckets, Object.fromEntries(agentRuns.map((run) => [run.bucket, bucketStatusFromRun(run)])));
+  const pool = await runSdkResearchPool({
+    runId: marker.runId,
+    rawUserPrompt: parts.rawUserPrompt,
+    normalizedTask: parts.normalizedTask,
+    coveragePlan,
+    sourceMatrix: matrix,
+    requiredBuckets,
+    cwd,
+    maxConcurrentBuckets: options.maxConcurrentBuckets ?? DEFAULT_SDK_MAX_CONCURRENT_BUCKETS,
+    workerLeaseMs: options.workerLeaseMs ?? DEFAULT_SDK_WORKER_LEASE_MS,
+    softTimeoutMs: options.softTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_SOFT_TIMEOUT_MS,
+    hardTimeoutMs: options.hardTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_HARD_TIMEOUT_MS,
+    globalBudgetMs: options.globalBudgetMs ?? DEFAULT_SDK_GLOBAL_BUDGET_MS,
+    heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_SDK_HEARTBEAT_INTERVAL_MS,
+    maxNoProgressHeartbeats: options.maxNoProgressHeartbeats ?? DEFAULT_SDK_MAX_NO_PROGRESS_HEARTBEATS,
+    maxSourcesPerWorker: options.maxSourcesPerWorker,
+    sdkStepRunner: legacyStepRunner(options)
+  });
+  if (runnerMode === "strict_programmatic" && pool.workerRuns.length === 0) {
+    const failureReason = "strict_programmatic started zero workers";
+    const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "failed", {
+      ...options,
+      ...reportTraceFields,
+      turnId: marker.turnId,
+      runId: marker.runId,
+      routerOutput,
+      rawUserPrompt: parts.rawUserPrompt,
+      normalizedTask: parts.normalizedTask,
+      runnerMode: "strict_programmatic",
+      evidenceMode: "none",
+      failureReason,
+      manualFallbackReason: failureReason,
+      subagentStatus: "failed",
+      subagentTriggerSource: "sdk_threads",
+      subagentSkipReason: failureReason,
+      sdkThreadsStarted: false,
+      sdkThreadsAllowed: true,
+      appHandoffRequired: false,
+      manualBackfillRequired: false,
+      programmaticMultiAgent: false,
+      sdkWorkerStatus: "failed",
+      sdkWorkerRuns: [],
+      bucketStatuses: {},
+      agentRuns: [],
+      researcherReports: []
+    });
+    report.status = "failed";
+    report.source_gaps = strictRequiredBuckets;
+    return writeParentResearchReport(cwd, report, true);
+  }
+  const agentRuns = pool.agentRuns;
+  const researcherReports = pool.researcherReports;
+  const bucketStatuses = bucketStatusesFromSdkPool(requiredBuckets, pool);
   const codexRun = agentRuns.find((run) => run.bucket === "codex_default_discovery");
   const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], codexDefaultStatusFromRun(codexRun, "not_configured"), {
     ...options,
@@ -983,20 +1182,69 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     normalizedTask: parts.normalizedTask,
     runnerMode,
     evidenceMode: "sdk_threads",
-    subagentStatus: agentRuns.length > 0 ? "spawned" : "failed",
+    subagentStatus: "not_applicable",
     subagentTriggerSource: "sdk_threads",
-    sdkThreadsStarted: true,
+    subagentSkipReason: "SDK worker pool was used; no App subagent spawn was recorded.",
+    sdkThreadsStarted: pool.workerRuns.length > 0,
     sdkThreadsAllowed: true,
     appHandoffRequired: false,
     subagentInstructionInjected: false,
-    programmaticMultiAgent: agentRuns.length > 0,
+    appSubagentStatus: "not_applicable",
+    programmaticMultiAgent: pool.programmaticMultiAgent,
     agentRuns,
     bucketStatuses,
-    researcherReports
+    researcherReports,
+    sdkWorkerStatus: pool.sdk_worker_status,
+    sdkWorkerRuns: pool.workerRuns,
+    failureReason: pool.sdk_worker_status === "failed" ? pool.failureReason : undefined
   });
+  report.status = sdkReportStatus(runnerMode, pool, report, coveragePlan);
+  report.manual_backfill_required = report.status !== "completed";
+  report.source_gaps = report.required_buckets.filter((bucket) => report.bucket_statuses[bucket] !== "completed" && report.bucket_statuses[bucket] !== "searched_but_no_signal");
+  applySdkReportFindings(report, pool);
   const written = writeParentResearchReport(cwd, report, true);
-  recordResearcherReportsEvidence(cwd, written.runId, researcherReports, coveragePlan);
   return written;
+}
+
+export async function resumeResearchRun(cwd: string, runId: string, options: RunResearchOptions = {}): Promise<ResearchReport> {
+  const report = loadResearchReport(cwd, runId);
+  if (report.runner_mode !== "sdk_threads" && report.runner_mode !== "strict_programmatic") {
+    throw new Error(`research resume only supports sdk_threads or strict_programmatic reports; got ${report.runner_mode}.`);
+  }
+  const plan = maybeLoadCoveragePlan(cwd, report.runId);
+  if (!plan) throw new Error(`coverage_plan.json is missing for runId=${report.runId}.`);
+  const resumableBuckets = listSdkWorkerStates(cwd, report.runId)
+    .filter((worker) => (worker.status === "needs_resume" || worker.status === "timeout" || worker.status === "failed") && Boolean(worker.threadId || worker.workerId))
+    .map((worker) => worker.bucket);
+  if (resumableBuckets.length === 0) return report;
+  const pool = await runSdkResearchPool({
+    runId: report.runId,
+    rawUserPrompt: report.rawUserPrompt,
+    normalizedTask: report.normalizedTask,
+    coveragePlan: plan,
+    sourceMatrix: report.source_matrix,
+    requiredBuckets: resumableBuckets,
+    cwd,
+    maxConcurrentBuckets: options.maxConcurrentBuckets ?? DEFAULT_SDK_MAX_CONCURRENT_BUCKETS,
+    workerLeaseMs: options.workerLeaseMs ?? DEFAULT_SDK_WORKER_LEASE_MS,
+    softTimeoutMs: options.softTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_SOFT_TIMEOUT_MS,
+    hardTimeoutMs: options.hardTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_HARD_TIMEOUT_MS,
+    globalBudgetMs: options.globalBudgetMs ?? DEFAULT_SDK_GLOBAL_BUDGET_MS,
+    heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_SDK_HEARTBEAT_INTERVAL_MS,
+    maxNoProgressHeartbeats: options.maxNoProgressHeartbeats ?? DEFAULT_SDK_MAX_NO_PROGRESS_HEARTBEATS,
+    maxSourcesPerWorker: options.maxSourcesPerWorker,
+    sdkStepRunner: legacyStepRunner(options),
+    resume: true
+  });
+  return mergeSdkPoolIntoReport(cwd, report, pool, plan);
+}
+
+export function listResearchWorkers(cwd: string, runId: string): ReturnType<typeof listSdkWorkerStates> {
+  return listSdkWorkerStates(cwd, runId);
+}
+
+export function cancelResearchWorker(cwd: string, runId: string, bucket: string): ReturnType<typeof cancelSdkWorker> {
+  return cancelSdkWorker(cwd, runId, bucket);
 }
 
 export interface ManualSourceInput {

@@ -26,6 +26,8 @@ export type SubagentReportStatus = "completed" | "timeout" | "failed" | "searche
 export type TriggerSource = "hook_user_prompt_submit" | "cli_command" | "manual_user_request" | "agents_md_only" | "skill_only" | "unknown";
 export type SubagentStatus = "spawned" | "not_spawned" | "unavailable" | "failed" | "not_applicable";
 export type SubagentTriggerSource = "app_tool" | "sdk_threads" | "manual" | "none";
+export type SdkWorkerStatus = "pending" | "running" | "completed" | "degraded" | "failed" | "timeout" | "cancelled" | "needs_resume";
+export type SdkWorkerPoolStatus = "completed" | "degraded" | "failed";
 
 export interface TaskClassification {
   researchHeavy: boolean;
@@ -106,6 +108,44 @@ export interface ResearchAgentRun {
   fallback_used: boolean;
 }
 
+export interface SdkWorkerState {
+  runId: string;
+  workerId: string;
+  bucket: string;
+  threadId: string;
+  status: SdkWorkerStatus;
+  startedAt: string;
+  endedAt: string | null;
+  lastHeartbeatAt: string;
+  lastCheckpointAt: string;
+  partialEvidenceCount: number;
+  lastProgressAt: string;
+  currentStep: string;
+  leaseExpiresAt: string;
+  softTimeoutAt: string;
+  hardTimeoutAt: string;
+  resumeAvailable: boolean;
+  failureReason: string;
+}
+
+export interface SdkWorkerRun {
+  runId: string;
+  workerId: string;
+  bucket: string;
+  threadId: string;
+  status: SdkWorkerStatus;
+  startedAt: string;
+  endedAt: string;
+  lastHeartbeatAt: string;
+  lastCheckpointAt: string;
+  partialEvidenceCount: number;
+  currentStep: string;
+  sources_found_count: number;
+  searched_but_no_signal: boolean;
+  failure_reason: string;
+  resumeAvailable: boolean;
+}
+
 export interface ResearchReport {
   runId: string;
   parentRunId?: string;
@@ -131,6 +171,9 @@ export interface ResearchReport {
   evidence_mode: ResearchEvidenceMode;
   failure_reason?: string;
   strict_programmatic?: boolean;
+  sdk_worker_status?: SdkWorkerPoolStatus;
+  sdk_worker_runs?: SdkWorkerRun[];
+  app_subagent_status?: "not_spawned" | "not_applicable";
   app_handoff_required: boolean;
   sdk_threads_started: boolean;
   sdk_threads_allowed: boolean;
