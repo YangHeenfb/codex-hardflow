@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { codexRunnerStatus, runIsolatedCodexPrompt } from "./codexRunner.js";
+import { buildCoveragePlan, maybeLoadCoveragePlan, writeCoveragePlan, type CoveragePlan } from "./coverage/coveragePlan.js";
+import { addEvidence, perspectiveForBucket, researchQuestionForBucket } from "./coverage/evidenceLedger.js";
 import { appendHookEvent } from "./hookEvents.js";
 import { buildSourceCoverageMatrix, applyDefaultDiscoveryFindings } from "./sourceMatrix.js";
 import { runLlmRouter } from "./router/llmRouter.js";
@@ -762,6 +764,14 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
   }
 
+  const coveragePlan = writeCoveragePlan(
+    cwd,
+    buildCoveragePlan(routerOutput, parts.rawUserPrompt, {
+      runId: marker.runId,
+      normalizedTask: parts.normalizedTask
+    })
+  );
+
   const reportTraceFields = {
     routerTraceReused,
     routerTracePath,
@@ -892,7 +902,9 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     bucketStatuses,
     researcherReports
   });
-  return writeParentResearchReport(cwd, report, true);
+  const written = writeParentResearchReport(cwd, report, true);
+  recordResearcherReportsEvidence(cwd, written.runId, researcherReports, coveragePlan);
+  return written;
 }
 
 export interface ManualSourceInput {
@@ -926,6 +938,58 @@ export function loadResearchReport(cwd: string, runId?: string): ResearchReport 
 function writeResearchReport(cwd: string, report: ResearchReport): ResearchReport {
   report.generatedAt = new Date().toISOString();
   return writeParentResearchReport(cwd, report, true);
+}
+
+function evidenceQueryForBucket(plan: CoveragePlan | undefined, bucket: string, fallback: string): string {
+  return plan?.researchQuestions.find((question) => question.bucket === bucket)?.question ?? fallback;
+}
+
+function recordSourceEvidence(cwd: string, runId: string, source: ResearchSource, engine: string, queryFallback: string, plan?: CoveragePlan): void {
+  const bucket = source.bucket ?? "codex_default_discovery";
+  addEvidence(cwd, {
+    runId,
+    bucket,
+    engine,
+    query: evidenceQueryForBucket(plan, bucket, queryFallback),
+    sourceType: source.source_type,
+    title: source.title,
+    urlOrRef: source.url_or_ref,
+    dateOrVersion: source.date_or_version,
+    claim: source.claim,
+    confidence: source.confidence,
+    perspectiveId: perspectiveForBucket(plan, bucket),
+    researchQuestionId: researchQuestionForBucket(plan, bucket)
+  });
+}
+
+function recordNoSignalEvidence(cwd: string, runId: string, bucket: string, engine: string, queryFallback: string, plan?: CoveragePlan): void {
+  addEvidence(cwd, {
+    runId,
+    bucket,
+    engine,
+    query: evidenceQueryForBucket(plan, bucket, queryFallback),
+    sourceType: "searched_but_no_signal",
+    title: `No signal recorded for ${bucket}`,
+    urlOrRef: `no-signal:${runId}:${bucket}`,
+    dateOrVersion: "not_applicable",
+    claim: `${engine} searched ${bucket} and recorded searched_but_no_signal.`,
+    confidence: "low",
+    perspectiveId: perspectiveForBucket(plan, bucket),
+    researchQuestionId: researchQuestionForBucket(plan, bucket)
+  });
+}
+
+function recordResearcherReportsEvidence(cwd: string, runId: string, reports: ResearcherReport[], plan?: CoveragePlan): void {
+  for (const researcherReport of reports) {
+    const engine = agentForBucket(researcherReport.bucket);
+    const queryFallback = researcherReport.queries_run.join(" | ") || researcherReport.bucket;
+    for (const source of researcherReport.sources_found) {
+      recordSourceEvidence(cwd, runId, { ...source, bucket: source.bucket ?? researcherReport.bucket }, engine, queryFallback, plan);
+    }
+    if (researcherReport.searched_but_no_signal) {
+      recordNoSignalEvidence(cwd, runId, researcherReport.bucket, engine, queryFallback, plan);
+    }
+  }
 }
 
 function upsertResearcherReport(report: ResearchReport, source: ResearchSource): void {
@@ -973,6 +1037,7 @@ function upsertManualAgentRun(report: ResearchReport, bucket: string, sourceCoun
 export function addManualSourceToReport(cwd: string, input: ManualSourceInput): ResearchReport {
   const report = loadResearchReport(cwd, input.runId);
   if (report.owner !== "parent") throw new Error("Manual sources can only be added to a parent research report.");
+  const plan = maybeLoadCoveragePlan(cwd, report.runId);
   const source: ResearchSource = {
     bucket: input.bucket,
     title: input.title,
@@ -1000,6 +1065,7 @@ export function addManualSourceToReport(cwd: string, input: ManualSourceInput): 
   else report.citations_or_refs.push(input.url_or_ref);
   report.source_gaps = report.source_gaps.filter((bucket) => bucket !== input.bucket);
   report.status = reportStatusForRunner(report.runner_mode, report.bucket_statuses, report.searched_sources_table);
+  recordSourceEvidence(cwd, report.runId, source, "manual_backfill", input.title, plan);
   return writeResearchReport(cwd, report);
 }
 
@@ -1098,6 +1164,7 @@ function shouldReplaceBucketStatus(current: ResearchBucketStatus | undefined, ne
 export function mergeSubagentReports(cwd: string, runId?: string): ResearchReport {
   const report = loadResearchReport(cwd, runId);
   if (report.owner !== "parent") throw new Error("Subagent reports can only be merged into a parent research report.");
+  const plan = maybeLoadCoveragePlan(cwd, report.runId);
   const dir = researchRunSubagentsDir(cwd, report.runId);
   if (!existsSync(dir)) return writeResearchReport(cwd, report);
   const files = readdirSync(dir).filter((file) => file.endsWith(".json") && !file.endsWith(".router_trace.json"));
@@ -1105,7 +1172,14 @@ export function mergeSubagentReports(cwd: string, runId?: string): ResearchRepor
     const path = `${dir}/${file}`;
     const subagent = JSON.parse(readFileSync(path, "utf8")) as SubagentReport;
     if (subagent.parentRunId !== report.runId) continue;
-    const addedSources = subagent.sources_found.reduce((count, source) => count + (mergeSource(report, subagent.bucket, source) ? 1 : 0), 0);
+    let addedSources = 0;
+    for (const source of subagent.sources_found) {
+      const normalizedSource = { ...source, bucket: source.bucket ?? subagent.bucket };
+      if (mergeSource(report, subagent.bucket, normalizedSource)) {
+        addedSources += 1;
+        recordSourceEvidence(cwd, report.runId, normalizedSource, subagent.agent, subagent.queries_run.join(" | ") || subagent.bucket, plan);
+      }
+    }
     mergeSubagentRun(report, subagent, subagent.sources_found.length);
     const bucketStatus = subagentStatusToBucketStatus(subagent);
     if (shouldReplaceBucketStatus(report.bucket_statuses[subagent.bucket], bucketStatus)) {
@@ -1113,6 +1187,7 @@ export function mergeSubagentReports(cwd: string, runId?: string): ResearchRepor
     }
     if (bucketStatus === "searched_but_no_signal" && !report.searched_but_no_signal.includes(subagent.bucket)) {
       report.searched_but_no_signal.push(subagent.bucket);
+      recordNoSignalEvidence(cwd, report.runId, subagent.bucket, subagent.agent, subagent.queries_run.join(" | ") || subagent.bucket, plan);
     }
     if (addedSources > 0) report.source_gaps = report.source_gaps.filter((bucket) => bucket !== subagent.bucket);
     if (!report.mergedSubagentReports.includes(file)) report.mergedSubagentReports.push(file);

@@ -83,6 +83,14 @@ export function researchRunRouterTracePath(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "router_trace.json");
 }
 
+export function researchRunCoveragePlanPath(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "coverage_plan.json");
+}
+
+export function researchRunEvidenceLedgerPath(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "evidence_ledger.json");
+}
+
 export function researchRunHookEventsPath(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "hook_events.jsonl");
 }
