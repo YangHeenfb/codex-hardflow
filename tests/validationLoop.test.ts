@@ -9,12 +9,33 @@ import { nextLoopAction } from "../src/loopController.js";
 import { executorManifestPath, validationSummaryPath } from "../src/paths.js";
 import { updateRegressionBank } from "../src/validators/buildRegressionBank.js";
 import { failedValidationSummary } from "../src/validators/runHiddenValidation.js";
+import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
+import type { RouterOutput } from "../src/router/routerSchema.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-test-"));
   mkdirSync(join(dir, ".agent", "manifests"), { recursive: true });
   mkdirSync(join(dir, ".agent", "reports"), { recursive: true });
   return dir;
+}
+
+function validationRouterOutput(): RouterOutput {
+  return {
+    route: "validation_sensitive_implementation",
+    workflowPattern: "repair_loop",
+    researchProfile: "none",
+    validationProfile: "hidden_validation_with_final_holdout",
+    sourceBuckets: [],
+    requiredAgents: [{ name: "executor", required: true, reason: "Implementation requires executor manifest." }],
+    requiresSourceMatrix: false,
+    requiresExecutorManifest: true,
+    requiresValidation: true,
+    requiresFinalHoldout: true,
+    requiresParallelIsolation: false,
+    reasons: ["Router selected validation-sensitive implementation."],
+    risks: ["may_need_hidden_validation"],
+    bypass: { requested: false, reason: "" }
+  };
 }
 
 describe("validation loop", () => {
@@ -60,6 +81,7 @@ describe("validation loop", () => {
       requiresValidation: true,
       input: { turnId: "turn-validation-missing" }
     });
+    writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: "fix production auth validation bug", currentRunId: marker.runId }, validationRouterOutput(), "llm", undefined, marker.turnId));
     writeFileSync(executorManifestPath(cwd), JSON.stringify({ task_id: "x" }));
     expect(stopValidationGate({ cwd, turnId: marker.turnId }).decision).toBe("block");
   });
@@ -76,6 +98,7 @@ describe("validation loop", () => {
       requiresValidation: true,
       input: { turnId: "turn-validation-failure" }
     });
+    writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: "fix production auth validation bug", currentRunId: marker.runId }, validationRouterOutput(), "llm", undefined, marker.turnId));
     writeFileSync(executorManifestPath(cwd), JSON.stringify({ task_id: "x" }));
     writeFileSync(validationSummaryPath(cwd), JSON.stringify(failedValidationSummary(0, "boundary")));
     expect(stopValidationGate({ cwd, turnId: marker.turnId }).decision).toBe("block");

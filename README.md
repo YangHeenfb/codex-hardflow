@@ -30,17 +30,27 @@ The package pins `@openai/codex-sdk` to `0.134.0`. Do not upgrade the Codex CLI 
 
 ```sh
 codex-hardflow status
-codex-hardflow research --runner app_handoff "compare current React data fetching options"
+codex-hardflow route --run-id <runId> --write-trace "compare current React data fetching options"
+codex-hardflow route --owner subagent --parent-run-id <runId> --subagent-name local_repo_researcher --bucket local_repo --write-trace "inspect local repo evidence"
+codex-hardflow research --run-id <runId> --runner app_handoff "compare current React data fetching options"
+codex-hardflow research --run-id <runId> --runner app_handoff --run-router "compare current React data fetching options"
+codex-hardflow research --run-id <runId> --strict-programmatic "compare current React data fetching options"
 codex-hardflow report add-source --run-id <runId> --bucket official_docs --title "Docs" --url "https://example.com" --claim "Primary source reviewed"
 codex-hardflow report add-subagent-report --run-id <runId> --agent official_docs_researcher --bucket official_docs --status completed
 codex-hardflow report merge-subagents --run-id <runId>
 codex-hardflow report finalize-manual --run-id <runId> --useful-finding "Recorded App/manual research evidence"
+codex-hardflow hooks assert-active --run-id <runId>
+codex-hardflow eval coverage --run-id <runId>
 codex-hardflow implement "add validation-sensitive feature"
 codex-hardflow validate
 codex-hardflow repair-loop
 codex-hardflow parallel modules.yaml
 codex-hardflow verify
 ```
+
+Task routing is handled by the structured LLM Router and recorded in `.agent/reports/runs/<runId>/router_trace.json`. Parent router traces update `.agent/reports/current/router_trace.json`; subagent router traces are isolated under `.agent/reports/runs/<runId>/subagents/*.router_trace.json` and must not overwrite current. `research --run-id <runId>` reuses an existing parent router trace for the same runId by default; `--run-router` explicitly reruns and replaces it. `--strict-programmatic` uses SDK threads and fails instead of falling back to App/AGENTS/skill/manual flow when SDK threads are unavailable. `--write-trace` is a boolean flag and does not consume task text. Deterministic keyword heuristics are only safety/preflight diagnostics, not the primary route source.
+
+AGENTS.md and the codex-hardflow skill are protocol documentation, not enforcement triggers. A run can claim hardflow completion only when a hook/CLI audit trail records `programmaticTrigger=true`.
 
 Use `codex-hardflow research --runner sdk_threads` or `--execute-sdk-research` only when you intentionally want the CLI to launch Codex SDK researcher threads. Interactive Codex App turns should use `app_handoff` and backfill App/manual/subagent findings through the `report` CLI. Parent reports are run-owned under `.agent/reports/runs/<runId>/research_report.json`; `.agent/reports/current/research_report.json` is only the current parent copy.
 

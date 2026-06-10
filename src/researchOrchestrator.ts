@@ -1,7 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { codexRunnerStatus, runIsolatedCodexPrompt } from "./codexRunner.js";
+import { appendHookEvent } from "./hookEvents.js";
 import { buildSourceCoverageMatrix, applyDefaultDiscoveryFindings } from "./sourceMatrix.js";
+import { runLlmRouter } from "./router/llmRouter.js";
+import { routerFailedOutput } from "./router/routerFallback.js";
+import type { RouterOutput, RouterTrace } from "./router/routerSchema.js";
+import { buildRouterTrace, writeRouterTrace } from "./router/routerTrace.js";
 import type {
   CodexDefaultDiscoveryStatus,
   ResearchAgentRun,
@@ -11,12 +16,15 @@ import type {
   ResearchReportOwner,
   ResearcherReport,
   ResearchRunnerMode,
+  SubagentStatus,
+  SubagentTriggerSource,
   ResearchSource,
   SubagentReport,
   SubagentReportStatus,
-  SourceCoverageMatrix
+  SourceCoverageMatrix,
+  TriggerSource
 } from "./schemas.js";
-import { currentResearchReportPath, researchRunMetadataPath, researchRunReportPath, researchRunSubagentsDir, researchSubagentReportPath } from "./paths.js";
+import { currentResearchReportPath, researchRunMetadataPath, researchRunReportPath, researchRunRouterTracePath, researchRunSubagentsDir, researchSubagentReportPath } from "./paths.js";
 import { createHookMarker, hashText, resolveLatestActiveMarker } from "./hookState.js";
 
 export interface BuildResearchReportOptions {
@@ -32,9 +40,19 @@ export interface BuildResearchReportOptions {
   bucket?: string;
   mergedSubagentReports?: string[];
   currentPointerUpdatedAt?: string;
+  routerOutput?: RouterOutput;
+  routerTraceReused?: boolean;
+  routerTracePath?: string;
+  routerTraceReuseReason?: string;
+  routerTraceStaleReason?: string;
   runnerMode?: ResearchRunnerMode;
   manualFallbackReason?: string;
   subagentStatus?: ResearchReport["subagent_status"];
+  subagentTriggerSource?: ResearchReport["subagent_trigger_source"];
+  subagentSkipReason?: string;
+  triggerSource?: TriggerSource;
+  programmaticTrigger?: boolean;
+  strictProgrammatic?: boolean;
   appHandoffRequired?: boolean;
   sdkThreadsStarted?: boolean;
   sdkThreadsAllowed?: boolean;
@@ -50,6 +68,11 @@ export interface RunResearchOptions extends BuildResearchReportOptions {
   sourceRoot?: string;
   input?: Record<string, unknown>;
   executeSdkResearch?: boolean;
+  runRouter?: boolean;
+  strictProgrammatic?: boolean;
+  sdkAvailable?: boolean;
+  routerPromptRunner?: (prompt: string, cwd: string) => Promise<string>;
+  routerTimeoutMs?: number;
   sdkTimeoutMs?: number;
   perBucketTimeoutMs?: number;
   maxConcurrentBuckets?: number;
@@ -160,15 +183,68 @@ function taskParts(task: string, options: Pick<BuildResearchReportOptions, "rawU
   return { rawUserPrompt, normalizedTask, classificationInput };
 }
 
-function sourceMatrixForTask(task: string, options: Pick<BuildResearchReportOptions, "rawUserPrompt" | "normalizedTask">): SourceCoverageMatrix {
+function sourceMatrixForTask(task: string, options: BuildResearchReportOptions): SourceCoverageMatrix {
   const parts = taskParts(task, options);
-  const matrix = buildSourceCoverageMatrix(parts.classificationInput);
+  const matrix = buildSourceCoverageMatrix(parts.classificationInput, {
+    rawUserPrompt: parts.rawUserPrompt,
+    normalizedTask: parts.normalizedTask,
+    classificationInput: parts.classificationInput,
+    runId: options.runId,
+    routerOutput: options.routerOutput
+  });
   return {
     ...matrix,
     task: parts.rawUserPrompt,
     rawUserPrompt: parts.rawUserPrompt,
     normalizedTask: parts.normalizedTask,
     classificationInput: parts.classificationInput
+  };
+}
+
+interface ExistingRouterTraceResolution {
+  output?: RouterOutput;
+  path: string;
+  reused: boolean;
+  reuseReason?: string;
+  staleReason?: string;
+}
+
+function matchingRouterTrace(trace: RouterTrace, parts: ReturnType<typeof taskParts>): boolean {
+  const expectedPromptHash = hashText(parts.rawUserPrompt);
+  if (trace.promptHash === expectedPromptHash) return true;
+  if (trace.rawUserPrompt.trim() === parts.rawUserPrompt.trim()) return true;
+  if ((trace.normalizedTask ?? "").trim() && trace.normalizedTask?.trim() === parts.normalizedTask.trim()) return true;
+  return false;
+}
+
+function resolveExistingParentRouterTrace(cwd: string, runId: string, parts: ReturnType<typeof taskParts>): ExistingRouterTraceResolution {
+  const path = researchRunRouterTracePath(cwd, runId);
+  if (!existsSync(path)) {
+    return { path, reused: false, staleReason: "No run-owned router_trace exists for this runId." };
+  }
+  let trace: RouterTrace;
+  try {
+    trace = JSON.parse(readFileSync(path, "utf8")) as RouterTrace;
+  } catch {
+    return { path, reused: false, staleReason: "Existing router_trace is not valid JSON." };
+  }
+  if ((trace.owner ?? "parent") === "subagent") {
+    return { path, reused: false, staleReason: "Existing router_trace is subagent-owned and cannot satisfy parent research." };
+  }
+  if (trace.runId !== runId) {
+    return { path, reused: false, staleReason: `Existing router_trace runId=${trace.runId ?? "missing"} does not match ${runId}.` };
+  }
+  if (!matchingRouterTrace(trace, parts)) {
+    return { path, reused: false, staleReason: "Existing router_trace promptHash/raw prompt/normalizedTask does not match this research task." };
+  }
+  if (!trace.routerOutput || trace.routerOutput.route === "router_failed") {
+    return { path, reused: false, staleReason: "Existing router_trace has no valid routerOutput to reuse." };
+  }
+  return {
+    output: trace.routerOutput,
+    path,
+    reused: true,
+    reuseReason: "Reused existing run-owned parent router_trace for this runId."
   };
 }
 
@@ -192,6 +268,21 @@ function manualBackfillRequiredFor(runnerMode: ResearchRunnerMode, status: Resea
   if (runnerMode === "app_handoff" || runnerMode === "manual_fallback") return true;
   if (runnerMode === "sdk_threads") return status !== "completed" || searchedSources.length === 0;
   return false;
+}
+
+function defaultSubagentStatus(runnerMode: ResearchRunnerMode, options: BuildResearchReportOptions): SubagentStatus {
+  if (options.subagentStatus) return options.subagentStatus;
+  if (runnerMode === "sdk_threads") return "spawned";
+  if (runnerMode === "app_handoff") return "not_spawned";
+  return "not_applicable";
+}
+
+function defaultSubagentTriggerSource(runnerMode: ResearchRunnerMode, status: SubagentStatus, options: BuildResearchReportOptions): SubagentTriggerSource {
+  if (options.subagentTriggerSource) return options.subagentTriggerSource;
+  if (runnerMode === "sdk_threads") return "sdk_threads";
+  if (status === "spawned") return "app_tool";
+  if (runnerMode === "manual_fallback" || runnerMode === "mixed") return "manual";
+  return "none";
 }
 
 export function buildResearchReport(
@@ -223,6 +314,8 @@ export function buildResearchReport(
   const searchedSources = researcherReports.flatMap((report) => report.sources_found);
   const status = reportStatusForRunner(runnerMode, bucketStatuses, searchedSources);
   const runId = options.runId ?? options.turnId ?? `run-${promptHash}-${hashText(generatedAt)}`;
+  const subagentStatus = defaultSubagentStatus(runnerMode, options);
+  const subagentTriggerSource = defaultSubagentTriggerSource(runnerMode, subagentStatus, options);
 
   return {
     runId,
@@ -241,15 +334,24 @@ export function buildResearchReport(
     turnId: options.turnId ?? `research-${hashText(task)}`,
     generatedAt,
     taskType: options.taskType ?? "research-heavy",
+    triggerSource: options.triggerSource ?? "unknown",
+    programmaticTrigger: options.programmaticTrigger ?? false,
     status,
     runner_mode: runnerMode,
+    strict_programmatic: options.strictProgrammatic,
     app_handoff_required: options.appHandoffRequired ?? runnerMode === "app_handoff",
     sdk_threads_started: options.sdkThreadsStarted ?? runnerMode === "sdk_threads",
     sdk_threads_allowed: options.sdkThreadsAllowed ?? runnerMode === "sdk_threads",
     subagent_instruction_injected: options.subagentInstructionInjected ?? runnerMode === "app_handoff",
     manual_backfill_required: options.manualBackfillRequired ?? manualBackfillRequiredFor(runnerMode, status, searchedSources),
     manual_fallback_reason: runnerMode === "manual_fallback" || runnerMode === "mixed" ? manualFallbackReason : undefined,
-    subagent_status: options.subagentStatus ?? "not_loaded",
+    subagent_status: subagentStatus,
+    subagent_trigger_source: subagentTriggerSource,
+    subagent_skip_reason: options.subagentSkipReason ?? (subagentStatus === "not_spawned" ? "Subagents were not spawned; manual/App backfill is required." : undefined),
+    router_trace_reused: options.routerTraceReused ?? false,
+    router_trace_path: options.routerTracePath,
+    router_trace_reuse_reason: options.routerTraceReuseReason,
+    router_trace_stale_reason: options.routerTraceStaleReason,
     source_matrix: matrix,
     required_buckets: requiredBuckets,
     bucket_statuses: bucketStatuses,
@@ -506,7 +608,10 @@ function writeRunMetadata(cwd: string, report: ResearchReport): void {
         owner: report.owner,
         promptHash: report.promptHash,
         parentTaskPromptHash: report.parentTaskPromptHash,
+        triggerSource: report.triggerSource,
+        programmaticTrigger: report.programmaticTrigger,
         runner_mode: report.runner_mode,
+        strict_programmatic: report.strict_programmatic,
         status: report.status,
         generatedAt: report.generatedAt,
         currentPointerUpdatedAt: report.currentPointerUpdatedAt
@@ -537,8 +642,10 @@ function writeParentResearchReport(cwd: string, report: ResearchReport, updateCu
 export async function runResearch(task: string, cwd: string, options: RunResearchOptions = {}): Promise<ResearchReport> {
   const sourceRoot = options.sourceRoot ?? cwd;
   const parts = taskParts(task, options);
-  const runnerMode: ResearchRunnerMode = options.executeSdkResearch ? "sdk_threads" : options.runnerMode ?? "app_handoff";
+  const runnerMode: ResearchRunnerMode = options.strictProgrammatic || options.executeSdkResearch ? "sdk_threads" : options.runnerMode ?? "app_handoff";
   if (runnerMode === "mixed") throw new Error("runnerMode=mixed is a report state created after backfill; use app_handoff, manual_fallback, or sdk_threads.");
+  const triggerSource = options.triggerSource ?? "cli_command";
+  const programmaticTrigger = options.programmaticTrigger ?? true;
   const marker = createHookMarker({
     cwd,
     prompt: parts.rawUserPrompt,
@@ -548,19 +655,137 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     requiresExecutorManifest: false,
     requiresValidation: false,
     runId: options.runId,
+    triggerSource,
+    programmaticTrigger,
     input: options.input ?? {}
   });
+  appendHookEvent(cwd, {
+    eventName: "CLI",
+    command: "research",
+    runId: marker.runId,
+    turnId: marker.turnId,
+    promptHash: marker.promptHash,
+    triggerSource,
+    programmaticTrigger
+  });
+  let routerOutput = options.routerOutput;
+  let routerTraceWritten = false;
+  let routerTraceReused = false;
+  let routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
+  let routerTraceReuseReason = options.routerOutput ? "Router output was provided by caller." : undefined;
+  let routerTraceStaleReason: string | undefined;
+  const existingTrace = resolveExistingParentRouterTrace(cwd, marker.runId, parts);
+
+  if (!routerOutput && !options.runRouter && existingTrace.output) {
+    routerOutput = existingTrace.output;
+    routerTraceReused = true;
+    routerTraceWritten = true;
+    routerTracePath = existingTrace.path;
+    routerTraceReuseReason = existingTrace.reuseReason;
+  } else if (!routerOutput && existingTrace.staleReason) {
+    routerTraceStaleReason = existingTrace.staleReason;
+    routerTracePath = existingTrace.path;
+  }
+
+  if (!routerOutput && options.runRouter) {
+    routerTraceReuseReason = existingTrace.output || existsSync(existingTrace.path)
+      ? "runRouter=true explicitly replaced the existing parent router_trace."
+      : "runRouter=true generated a fresh parent router_trace.";
+    const routed = await runLlmRouter(
+      {
+        rawUserPrompt: parts.rawUserPrompt,
+        normalizedTask: parts.normalizedTask,
+        currentRunId: marker.runId,
+        triggerSource,
+        programmaticTrigger,
+        previousHookMarker: { ...marker }
+      },
+      {
+        cwd,
+        timeoutMs: options.routerTimeoutMs,
+        promptRunner: options.routerPromptRunner,
+        turnId: marker.turnId,
+        writeTrace: true,
+        triggerSource,
+        programmaticTrigger
+      }
+    );
+    routerOutput = routed.output;
+    routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
+    routerTraceWritten = true;
+  }
+  if (!routerOutput) {
+    routerOutput = routerFailedOutput("Router output was not provided; no keyword fallback used.");
+    writeRouterTrace(
+      cwd,
+      buildRouterTrace(
+        {
+          rawUserPrompt: parts.rawUserPrompt,
+          normalizedTask: parts.normalizedTask,
+          currentRunId: marker.runId,
+          triggerSource,
+          programmaticTrigger,
+          previousHookMarker: { ...marker }
+        },
+        routerOutput,
+        "router_failed",
+        "Router output was not provided; no keyword fallback used.",
+        marker.turnId,
+        { triggerSource, programmaticTrigger }
+      ),
+      true
+    );
+    routerTraceWritten = true;
+    routerTraceReuseReason = "No reusable routerOutput was available; wrote router_failed trace without keyword fallback.";
+    routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
+  }
+  if (!routerTraceWritten) {
+    writeRouterTrace(
+      cwd,
+      buildRouterTrace(
+        {
+          rawUserPrompt: parts.rawUserPrompt,
+          normalizedTask: parts.normalizedTask,
+          currentRunId: marker.runId,
+          triggerSource,
+          programmaticTrigger,
+          previousHookMarker: { ...marker }
+        },
+        routerOutput,
+        routerOutput.route === "bypass" || routerOutput.bypass.requested ? "semantic_bypass" : "llm",
+        undefined,
+        marker.turnId,
+        { triggerSource, programmaticTrigger }
+      ),
+      true
+    );
+    routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
+  }
+
+  const reportTraceFields = {
+    routerTraceReused,
+    routerTracePath,
+    routerTraceReuseReason,
+    routerTraceStaleReason,
+    triggerSource,
+    programmaticTrigger,
+    strictProgrammatic: options.strictProgrammatic
+  };
 
   if (runnerMode === "app_handoff") {
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
       ...options,
+      ...reportTraceFields,
       turnId: marker.turnId,
       runId: marker.runId,
+      routerOutput,
       rawUserPrompt: parts.rawUserPrompt,
       normalizedTask: parts.normalizedTask,
       runnerMode: "app_handoff",
       manualFallbackReason: options.manualFallbackReason ?? DEFAULT_APP_HANDOFF_REASON,
-      subagentStatus: options.subagentStatus ?? "not_loaded",
+      subagentStatus: options.subagentStatus ?? "not_spawned",
+      subagentTriggerSource: options.subagentTriggerSource ?? "none",
+      subagentSkipReason: options.subagentSkipReason ?? "App subagents have not been observed as spawned for this run; backfill manual/App evidence or use strict SDK threads.",
       appHandoffRequired: true,
       sdkThreadsStarted: false,
       sdkThreadsAllowed: false,
@@ -573,27 +798,63 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
   if (runnerMode === "manual_fallback") {
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
       ...options,
+      ...reportTraceFields,
       turnId: marker.turnId,
       runId: marker.runId,
+      routerOutput,
       rawUserPrompt: parts.rawUserPrompt,
       normalizedTask: parts.normalizedTask,
       runnerMode: "manual_fallback",
       manualFallbackReason: options.manualFallbackReason ?? "Manual fallback explicitly requested.",
-      subagentStatus: options.subagentStatus ?? "not_loaded"
+      subagentStatus: options.subagentStatus ?? "not_applicable",
+      subagentTriggerSource: options.subagentTriggerSource ?? "manual"
     });
     return writeParentResearchReport(cwd, report, true);
   }
 
-  if (!codexRunnerStatus().codexExportAvailable || !codexRunnerStatus().threadExportAvailable) {
-    const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
+  const sdkStatus = codexRunnerStatus();
+  const sdkAvailable = options.sdkAvailable ?? (sdkStatus.codexExportAvailable && sdkStatus.threadExportAvailable);
+  if (!sdkAvailable && options.strictProgrammatic) {
+    const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "failed", {
       ...options,
+      ...reportTraceFields,
       turnId: marker.turnId,
       runId: marker.runId,
+      routerOutput,
+      rawUserPrompt: parts.rawUserPrompt,
+      normalizedTask: parts.normalizedTask,
+      runnerMode: "sdk_threads",
+      manualFallbackReason: "Strict programmatic mode requires SDK threads; SDK runner is unavailable.",
+      subagentStatus: "failed",
+      subagentTriggerSource: "sdk_threads",
+      subagentSkipReason: "Strict programmatic SDK threads were required but unavailable.",
+      sdkThreadsStarted: false,
+      sdkThreadsAllowed: true,
+      appHandoffRequired: false,
+      manualBackfillRequired: false,
+      bucketStatuses: {},
+      agentRuns: [],
+      researcherReports: []
+    });
+    report.status = "failed";
+    report.source_gaps = report.required_buckets;
+    return writeParentResearchReport(cwd, report, true);
+  }
+
+  if (!sdkAvailable) {
+    const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
+      ...options,
+      ...reportTraceFields,
+      turnId: marker.turnId,
+      runId: marker.runId,
+      routerOutput,
       rawUserPrompt: parts.rawUserPrompt,
       normalizedTask: parts.normalizedTask,
       runnerMode: "manual_fallback",
       manualFallbackReason: "Codex SDK runner is unavailable.",
       subagentStatus: "unavailable",
+      subagentTriggerSource: "none",
+      subagentSkipReason: "Codex SDK runner is unavailable and strict programmatic mode was not requested.",
       sdkThreadsStarted: false,
       sdkThreadsAllowed: true,
       manualBackfillRequired: true
@@ -601,7 +862,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     return writeParentResearchReport(cwd, report, true);
   }
 
-  let matrix = sourceMatrixForTask(task, options);
+  let matrix = sourceMatrixForTask(task, { ...options, routerOutput, runId: marker.runId, rawUserPrompt: parts.rawUserPrompt, normalizedTask: parts.normalizedTask });
   if (options.defaultDiscoveryBuckets?.length) {
     matrix = applyDefaultDiscoveryFindings(matrix, options.defaultDiscoveryBuckets);
   }
@@ -614,12 +875,15 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
   const codexRun = agentRuns.find((run) => run.bucket === "codex_default_discovery");
   const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], codexDefaultStatusFromRun(codexRun, "not_configured"), {
     ...options,
+    ...reportTraceFields,
     turnId: marker.turnId,
     runId: marker.runId,
+    routerOutput,
     rawUserPrompt: parts.rawUserPrompt,
     normalizedTask: parts.normalizedTask,
     runnerMode: "sdk_threads",
-    subagentStatus: "unavailable",
+    subagentStatus: "spawned",
+    subagentTriggerSource: "sdk_threads",
     sdkThreadsStarted: true,
     sdkThreadsAllowed: true,
     appHandoffRequired: false,
@@ -722,6 +986,11 @@ export function addManualSourceToReport(cwd: string, input: ManualSourceInput): 
   report.runner_mode = "mixed";
   report.manual_backfill_required = false;
   report.app_handoff_required = false;
+  if (report.subagent_status !== "spawned") {
+    report.subagent_status = "not_spawned";
+    report.subagent_trigger_source = "manual";
+    report.subagent_skip_reason = report.subagent_skip_reason ?? "Manual source backfill was used; no App subagent spawn was recorded.";
+  }
   report.bucket_statuses[input.bucket] = "manual_backfilled";
   report.searched_sources_table.push(source);
   upsertResearcherReport(report, source);
@@ -831,7 +1100,7 @@ export function mergeSubagentReports(cwd: string, runId?: string): ResearchRepor
   if (report.owner !== "parent") throw new Error("Subagent reports can only be merged into a parent research report.");
   const dir = researchRunSubagentsDir(cwd, report.runId);
   if (!existsSync(dir)) return writeResearchReport(cwd, report);
-  const files = readdirSync(dir).filter((file) => file.endsWith(".json"));
+  const files = readdirSync(dir).filter((file) => file.endsWith(".json") && !file.endsWith(".router_trace.json"));
   for (const file of files) {
     const path = `${dir}/${file}`;
     const subagent = JSON.parse(readFileSync(path, "utf8")) as SubagentReport;
@@ -851,6 +1120,11 @@ export function mergeSubagentReports(cwd: string, runId?: string): ResearchRepor
   report.runner_mode = report.searched_sources_table.length > 0 ? "mixed" : report.runner_mode;
   report.manual_backfill_required = report.searched_sources_table.length === 0;
   report.app_handoff_required = report.runner_mode === "app_handoff";
+  if (files.length > 0) {
+    report.subagent_status = "spawned";
+    report.subagent_trigger_source = "app_tool";
+    report.subagent_skip_reason = undefined;
+  }
   report.status = reportStatusForRunner(report.runner_mode, report.bucket_statuses, report.searched_sources_table);
   return writeResearchReport(cwd, report);
 }
@@ -888,6 +1162,12 @@ export function assertResearchReportEvidence(report: ResearchReport, options: Re
   }
   if (!report.runId) {
     return { passed: false, reason: "research_report is missing runId." };
+  }
+  if (report.programmaticTrigger !== true) {
+    return { passed: false, reason: "research_report cannot claim hardflow evidence because programmaticTrigger is not true." };
+  }
+  if (report.triggerSource === "agents_md_only" || report.triggerSource === "skill_only" || report.triggerSource === "unknown") {
+    return { passed: false, reason: `research_report triggerSource=${report.triggerSource} cannot claim programmatic hardflow evidence.` };
   }
   const requiredBuckets = report.source_matrix?.requiredBuckets?.length
     ? report.source_matrix.requiredBuckets

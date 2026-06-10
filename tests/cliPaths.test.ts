@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -31,6 +31,31 @@ describe("CLI path status and shell wrapper", () => {
     const status = cliPathStatus(process.cwd(), { homeDir: home, appPathEnv: "", shellPathEnv: "" });
     expect(status.wrapperAvailable).toBe(false);
     expect(status.wrapperConflict).toBe(true);
+  });
+
+  it("updates stale managed wrapper to the current source root with a backup", () => {
+    const home = mkdtempSync(join(tmpdir(), "hardflow-home-"));
+    const oldRoot = mkdtempSync(join(tmpdir(), "hardflow-old-root-"));
+    const oldBin = join(oldRoot, "bin", "codex-hardflow");
+    mkdirSync(join(oldRoot, "bin"), { recursive: true });
+    mkdirSync(join(home, ".local", "bin"), { recursive: true });
+    writeFileSync(oldBin, "#!/bin/sh\nexit 0\n");
+    chmodSync(oldBin, 0o755);
+    writeFileSync(join(oldRoot, "package.json"), JSON.stringify({ version: "0.0.1" }));
+    const path = shellWrapperPath(home);
+    writeFileSync(path, `#!/bin/sh\nexec '${oldBin}' "$@"\n`);
+    chmodSync(path, 0o755);
+
+    const stale = cliPathStatus(process.cwd(), { homeDir: home, appPathEnv: "", shellPathEnv: "" });
+    expect(stale.wrapperPointsToCurrentSourceRoot).toBe(false);
+    expect(stale.wrapperVersion).toBe("0.0.1");
+
+    const result = installShellWrapper(process.cwd(), home);
+    expect(result.reason).toBe("updated-stale-managed-wrapper");
+    expect(result.backupPath && existsSync(result.backupPath)).toBe(true);
+    expect(readFileSync(path, "utf8")).toContain(absoluteCommandFor(process.cwd()));
+    const fresh = cliPathStatus(process.cwd(), { homeDir: home, appPathEnv: "", shellPathEnv: "" });
+    expect(fresh.wrapperPointsToCurrentSourceRoot).toBe(true);
   });
 
   it("distinguishes shell PATH from app PATH and still reports the absolute command", () => {

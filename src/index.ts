@@ -1,4 +1,7 @@
 export * from "./classify.js";
+export * from "./coverageEval.js";
+export * from "./flagParser.js";
+export * from "./hookEvents.js";
 export * from "./sourceMatrix.js";
 export * from "./sanitizer.js";
 export * from "./similarityGuard.js";
@@ -10,3 +13,9 @@ export * from "./researchOrchestrator.js";
 export * from "./validationOrchestrator.js";
 export * from "./schemas.js";
 export * from "./probes/logprobsProbe.js";
+export * from "./router/routerSchema.js";
+export * from "./router/routerPrompt.js";
+export * from "./router/routerFallback.js";
+export * from "./router/routerNormalize.js";
+export * from "./router/routerTrace.js";
+export * from "./router/llmRouter.js";

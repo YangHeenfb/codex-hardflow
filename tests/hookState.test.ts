@@ -9,6 +9,8 @@ import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
 import { addManualSourceToReport, buildResearchReport, runResearch } from "../src/researchOrchestrator.js";
 import { currentResearchReportPath, legacyResearchReportPath, repoHash, researchRunReportPath } from "../src/paths.js";
+import { broadResearchRouterOutput } from "./routerFixtures.js";
+import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-hook-"));
@@ -18,12 +20,13 @@ function tempRepo(): string {
 }
 
 function writeReport(cwd: string, marker: HookMarker, prompt: string, generatedAt?: string): void {
-  const report = buildResearchReport(prompt, [], "not_configured", { runId: marker.runId, turnId: marker.turnId });
+  const report = buildResearchReport(prompt, [], "not_configured", { runId: marker.runId, turnId: marker.turnId, routerOutput: broadResearchRouterOutput });
   report.generatedAt = generatedAt ?? new Date(Date.parse(marker.createdAt) + 1_000).toISOString();
   for (const target of [researchRunReportPath(cwd, marker.runId), currentResearchReportPath(cwd)]) {
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
   }
+  writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId }, broadResearchRouterOutput, "llm", undefined, marker.turnId));
 }
 
 describe("hook marker Stop gate", () => {
@@ -46,13 +49,14 @@ describe("hook marker Stop gate", () => {
     expect(result.decision).toBe("allow");
     const context = String((result.hookSpecificOutput as Record<string, unknown>).additionalContext);
     expect((result.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
-    expect(context).toContain("research_report.json");
+    expect(context).toContain("router_trace");
     expect(context).toContain("promptHash=");
     const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-schema"), "utf8")) as HookMarker;
     expect(marker.turnId).toBe("turn-schema");
     expect(marker.cwdHash).toBe(repoHash(cwd));
-    expect(marker.taskType).toBe("research-heavy");
-    expect(marker.requiresSourceMatrix).toBe(true);
+    expect(marker.taskType).toBe("router-preflight");
+    expect(marker.requiresSourceMatrix).toBe(false);
+    expect(marker.runId).toBe("run-turn-schema");
     expect(marker.maxBlocks).toBe(2);
   });
 
@@ -143,6 +147,7 @@ describe("hook marker Stop gate", () => {
     const prompt = "research current onboarding patterns for product teams";
     const report = await runResearch(prompt, cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "app_handoff",
       input: { turnId: "turn-runid-stop" }
     });
@@ -161,7 +166,7 @@ describe("hook marker Stop gate", () => {
       });
     }
 
-    const stale = buildResearchReport("research stale task", [], "not_configured", { runId: "stale-run" });
+    const stale = buildResearchReport("research stale task", [], "not_configured", { runId: "stale-run", routerOutput: broadResearchRouterOutput });
     writeFileSync(legacyResearchReportPath(cwd), `${JSON.stringify(stale, null, 2)}\n`);
 
     expect(stopValidationGate({ cwd, turnId: "turn-runid-stop" }).decision).toBe("allow");
@@ -183,6 +188,7 @@ describe("hook marker Stop gate", () => {
     const stale = buildResearchReport("research stale security architecture", [], "not_configured", {
       runId: "old-run",
       turnId: "old-turn",
+      routerOutput: broadResearchRouterOutput,
       generatedAt: new Date(Date.parse(marker.createdAt) + 1_000).toISOString()
     });
     for (const target of [researchRunReportPath(cwd, marker.runId), currentResearchReportPath(cwd)]) {
@@ -213,6 +219,7 @@ describe("hook marker Stop gate", () => {
       parentRunId: marker.runId,
       subagentName: "official_docs_researcher",
       bucket: "official_docs",
+      routerOutput: broadResearchRouterOutput,
       generatedAt: new Date(Date.parse(marker.createdAt) + 1_000).toISOString()
     });
     for (const target of [researchRunReportPath(cwd, marker.runId), currentResearchReportPath(cwd)]) {

@@ -5,7 +5,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createHookMarker, type HookMarker } from "../src/hookState.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
 import { addManualSourceToReport, addSubagentReport, assertResearchReportEvidence, buildResearchReport, loadResearchReport, mergeSubagentReports, runResearch } from "../src/researchOrchestrator.js";
-import { currentResearchReportPath, researchReportPath, researchRunReportPath, researchSubagentReportPath } from "../src/paths.js";
+import { currentResearchReportPath, researchReportPath, researchRunReportPath, researchRunRouterTracePath, researchSubagentReportPath } from "../src/paths.js";
+import { agentSecurityRouterOutput, broadResearchRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
+import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
+import type { RouterOutput, RouterTrace } from "../src/router/routerSchema.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-research-"));
@@ -32,6 +35,12 @@ function writeReport(cwd: string, marker: HookMarker, report: Record<string, unk
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
   }
+  const routerOutput = ((report.source_matrix as Record<string, unknown> | undefined)?.routerOutput ?? broadResearchRouterOutput) as RouterOutput;
+  writeRouterTrace(
+    cwd,
+    buildRouterTrace({ rawUserPrompt: String(report.rawUserPrompt ?? report.task ?? ""), currentRunId: marker.runId }, routerOutput, "llm", undefined, marker.turnId),
+    true
+  );
 }
 
 describe("research runner reports", () => {
@@ -43,6 +52,7 @@ describe("research runner reports", () => {
     const cwd = tempRepo();
     const report = await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "manual_fallback",
       manualFallbackReason: "SDK unavailable in test",
       input: { turnId: "turn-manual-runner" }
@@ -59,6 +69,7 @@ describe("research runner reports", () => {
     const cwd = tempRepo();
     const report = await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "sdk_threads",
       sdkTimeoutMs: 1,
       input: { turnId: "turn-timeout-runner" },
@@ -74,6 +85,7 @@ describe("research runner reports", () => {
     const cwd = tempRepo();
     const report = await runResearch("troubleshoot the latest Next.js auth package error", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: routerOutputForBuckets(["official_docs", "github", "community", "package_registry", "security", "codex_default_discovery"]),
       runnerMode: "sdk_threads",
       input: { turnId: "turn-context-exhausted" },
       sdkPromptRunner: async (_prompt, _cwd, bucket) => {
@@ -104,7 +116,7 @@ describe("research runner reports", () => {
       requiresValidation: false,
       input: { turnId: "turn-missing-agent-runs" }
     });
-    const report = buildResearchReport(prompt, [], "not_configured", { turnId: marker.turnId }) as unknown as Record<string, unknown>;
+    const report = buildResearchReport(prompt, [], "not_configured", { turnId: marker.turnId, runId: marker.runId, routerOutput: broadResearchRouterOutput }) as unknown as Record<string, unknown>;
     delete report.agent_runs;
     writeReport(cwd, marker, report);
 
@@ -126,6 +138,8 @@ describe("research runner reports", () => {
     });
     const report = buildResearchReport(prompt, [], "not_configured", {
       turnId: marker.turnId,
+      runId: marker.runId,
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "manual_fallback",
       manualFallbackReason: "manual search used despite available subagent capability",
       subagentStatus: "available"
@@ -140,6 +154,7 @@ describe("research runner reports", () => {
     const prompt = "research current agent framework choices";
     await runResearch(prompt, cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "sdk_threads",
       input: { turnId: "turn-manual-backfill" },
       sdkPromptRunner: async (_prompt, _cwd, bucket) => validRunnerJson(bucket)
@@ -178,6 +193,7 @@ describe("research runner reports", () => {
     const prompt = "research current agent framework choices";
     await runResearch(prompt, cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "sdk_threads",
       sdkTimeoutMs: 1,
       input: { turnId: "turn-all-timeout" },
@@ -192,6 +208,7 @@ describe("research runner reports", () => {
     let sdkCalls = 0;
     const report = await runResearch("research current AI coding agent evaluation approaches", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "app_handoff",
       input: { turnId: "turn-app-handoff-empty" },
       sdkPromptRunner: async () => {
@@ -216,6 +233,7 @@ describe("research runner reports", () => {
     const cwd = tempRepo();
     const report = await runResearch("research current AI coding agent evaluation approaches", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: agentSecurityRouterOutput,
       runnerMode: "app_handoff",
       input: { turnId: "turn-run-owned" }
     });
@@ -227,10 +245,127 @@ describe("research runner reports", () => {
     expect(JSON.parse(readFileSync(currentResearchReportPath(cwd), "utf8")).runId).toBe(report.runId);
   });
 
+  it("route then research with the same runId reuses the parent router_trace", async () => {
+    const cwd = tempRepo();
+    const prompt = "research current agent framework choices";
+    const runId = "run-reuse-router-trace";
+    writeRouterTrace(
+      cwd,
+      buildRouterTrace({ rawUserPrompt: prompt, normalizedTask: prompt, currentRunId: runId }, broadResearchRouterOutput, "llm", undefined, "turn-route-first"),
+      true
+    );
+    const before = readFileSync(researchRunRouterTracePath(cwd, runId), "utf8");
+
+    const report = await runResearch(prompt, cwd, {
+      sourceRoot: process.cwd(),
+      runId,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-reuse-router-trace" }
+    });
+
+    expect(report.router_trace_reused).toBe(true);
+    expect(report.router_trace_path).toBe(researchRunRouterTracePath(cwd, runId));
+    expect(report.source_matrix.routerStatus).toBe("available");
+    expect(report.required_buckets).toEqual(expect.arrayContaining(["official_docs", "github", "community", "codex_default_discovery"]));
+    expect(readFileSync(researchRunRouterTracePath(cwd, runId), "utf8")).toBe(before);
+  });
+
+  it("stale router_trace with a different promptHash is not reused", async () => {
+    const cwd = tempRepo();
+    const runId = "run-stale-router-trace";
+    writeRouterTrace(
+      cwd,
+      buildRouterTrace({ rawUserPrompt: "research stale task", normalizedTask: "research stale task", currentRunId: runId }, broadResearchRouterOutput, "llm", undefined, "turn-stale-route"),
+      true
+    );
+
+    const report = await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      runId,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-stale-router-trace" }
+    });
+
+    expect(report.router_trace_reused).toBe(false);
+    expect(report.router_trace_stale_reason).toContain("does not match");
+    expect(report.source_matrix.routerStatus).toBe("unavailable");
+    const trace = JSON.parse(readFileSync(researchRunRouterTracePath(cwd, runId), "utf8")) as RouterTrace;
+    expect(trace.route).toBe("router_failed");
+  });
+
+  it("subagent-owned router_trace is not reused as a parent trace", async () => {
+    const cwd = tempRepo();
+    const prompt = "research current agent framework choices";
+    const runId = "run-subagent-owned-trace";
+    const trace = buildRouterTrace(
+      { rawUserPrompt: prompt, normalizedTask: prompt, currentRunId: runId },
+      broadResearchRouterOutput,
+      "llm",
+      undefined,
+      "turn-subagent-owned",
+      { owner: "subagent", parentRunId: runId, subagentName: "local_repo_researcher", bucket: "local_repo" }
+    );
+    mkdirSync(join(cwd, ".agent", "reports", "runs", runId), { recursive: true });
+    writeFileSync(researchRunRouterTracePath(cwd, runId), `${JSON.stringify(trace, null, 2)}\n`);
+
+    const report = await runResearch(prompt, cwd, {
+      sourceRoot: process.cwd(),
+      runId,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-subagent-trace-not-reused" }
+    });
+
+    expect(report.router_trace_reused).toBe(false);
+    expect(report.router_trace_stale_reason).toContain("subagent-owned");
+  });
+
+  it("runRouter=true explicitly reruns router and replaces an existing parent trace", async () => {
+    const cwd = tempRepo();
+    const prompt = "research current AI coding agent security evaluation";
+    const runId = "run-explicit-router-rerun";
+    writeRouterTrace(
+      cwd,
+      buildRouterTrace({ rawUserPrompt: prompt, normalizedTask: prompt, currentRunId: runId }, broadResearchRouterOutput, "llm", undefined, "turn-old-route"),
+      true
+    );
+
+    const report = await runResearch(prompt, cwd, {
+      sourceRoot: process.cwd(),
+      runId,
+      runnerMode: "app_handoff",
+      runRouter: true,
+      routerPromptRunner: async () => JSON.stringify(agentSecurityRouterOutput),
+      input: { turnId: "turn-explicit-router-rerun" }
+    });
+
+    expect(report.router_trace_reused).toBe(false);
+    expect(report.router_trace_reuse_reason).toContain("replaced");
+    expect(report.required_buckets).toContain("security");
+    const trace = JSON.parse(readFileSync(researchRunRouterTracePath(cwd, runId), "utf8")) as RouterTrace;
+    expect(trace.promptHash).toBe(report.promptHash);
+    expect(trace.sourceBuckets.map((bucket) => bucket.bucket)).toContain("security");
+  });
+
+  it("records not_spawned subagent status with a skip reason", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      subagentStatus: "not_spawned",
+      subagentSkipReason: "App subagent runtime was disabled in this test.",
+      input: { turnId: "turn-subagents-not-spawned" }
+    });
+
+    expect(report.subagent_status).toBe("not_spawned");
+    expect(report.subagent_skip_reason).toBe("App subagent runtime was disabled in this test.");
+  });
+
   it("subagent report cannot overwrite parent report and only merges through parent flow", async () => {
     const cwd = tempRepo();
     const parent = await runResearch("research current onboarding patterns for product teams", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "app_handoff",
       input: { turnId: "turn-subagent-isolated" }
     });
@@ -271,6 +406,7 @@ describe("research runner reports", () => {
     const prompt = "research current onboarding patterns for product teams";
     await runResearch(prompt, cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "app_handoff",
       input: { turnId: "turn-app-handoff-backfilled" }
     });
@@ -304,6 +440,7 @@ describe("research runner reports", () => {
     const cwd = tempRepo();
     const report = await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       runnerMode: "sdk_threads",
       sdkTimeoutMs: 1,
       input: { turnId: "turn-assert-all-timeout" },
@@ -318,6 +455,7 @@ describe("research runner reports", () => {
     let sdkCalls = 0;
     const defaultReport = await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       input: { turnId: "turn-default-app-handoff" },
       sdkPromptRunner: async (_prompt, _cwd, bucket) => {
         sdkCalls += 1;
@@ -329,6 +467,7 @@ describe("research runner reports", () => {
 
     await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
       executeSdkResearch: true,
       input: { turnId: "turn-explicit-sdk" },
       sdkPromptRunner: async (_prompt, _cwd, bucket) => {
@@ -355,6 +494,8 @@ describe("research runner reports", () => {
     const generatedAt = new Date(Date.parse(marker.createdAt) + 1_000).toISOString();
     const report = buildResearchReport(prompt, [], "timeout", {
       turnId: marker.turnId,
+      runId: marker.runId,
+      routerOutput: broadResearchRouterOutput,
       generatedAt,
       agentRuns: [
         {

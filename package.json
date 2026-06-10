@@ -37,7 +37,8 @@
     "CONTRIBUTING.md"
   ],
   "dependencies": {
-    "@openai/codex-sdk": "0.134.0"
+    "@openai/codex-sdk": "0.134.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.9.2",

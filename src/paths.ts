@@ -79,6 +79,18 @@ export function researchRunReportPath(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "research_report.json");
 }
 
+export function researchRunRouterTracePath(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "router_trace.json");
+}
+
+export function researchRunHookEventsPath(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "hook_events.jsonl");
+}
+
+export function currentRouterTracePath(cwd: string): string {
+  return join(currentResearchReportsDir(cwd), "router_trace.json");
+}
+
 export function researchRunMetadataPath(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "metadata.json");
 }
@@ -89,6 +101,10 @@ export function researchRunSubagentsDir(cwd: string, runId: string): string {
 
 export function researchSubagentReportPath(cwd: string, runId: string, agent: string, bucket: string): string {
   return join(researchRunSubagentsDir(cwd, runId), `${safeReportSegment(agent)}-${safeReportSegment(bucket)}.json`);
+}
+
+export function researchSubagentRouterTracePath(cwd: string, runId: string, agent: string, bucket: string): string {
+  return join(researchRunSubagentsDir(cwd, runId), `${safeReportSegment(agent)}-${safeReportSegment(bucket)}.router_trace.json`);
 }
 
 export interface SkillPathStrategy {

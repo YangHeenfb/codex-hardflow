@@ -2,7 +2,7 @@ import type { TaskClassification } from "./schemas.js";
 
 const re = (pattern: RegExp, text: string) => pattern.test(text);
 
-export function classifyTask(task: string): TaskClassification {
+export function safetyHeuristics(task: string): TaskClassification {
   const text = task.toLowerCase();
   const troubleshooting = re(/\b(error|fails?|failing|debug|troubleshoot|bug|regression|stack trace|not working)\b|调试|故障|报错|失败/, text);
   const currentState = re(/\b(latest|current|today|recent|up[- ]?to[- ]?date|now|202[5-9]|best option|best practice)\b/, text);
@@ -46,9 +46,13 @@ export function classifyTask(task: string): TaskClassification {
 }
 
 export function shouldUseHardflow(task: string): boolean {
-  if (/\b(do not use hardflow|no hardflow|skip hardflow|bypass hardflow|quick answer)\b|不要\s*(使用\s*)?hardflow|禁用\s*hardflow|直接回答|不做多源研究/i.test(task)) {
-    return false;
-  }
-  const c = classifyTask(task);
+  const c = safetyHeuristics(task);
   return c.researchHeavy || c.implementation || c.validationSensitive || c.parallelModules;
 }
+
+/**
+ * Deprecated compatibility alias. Do not use as the primary route source.
+ * The LLM router owns task routing; this helper is only for deterministic
+ * safety/preflight diagnostics.
+ */
+export const classifyTask = safetyHeuristics;

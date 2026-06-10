@@ -1,41 +1,62 @@
-import { classifyTask } from "./classify.js";
+import { safetyHeuristics } from "./classify.js";
+import { hashText } from "./hookState.js";
 import type { SourceCoverageMatrix, SourceMatrixEntry, TaskClassification } from "./schemas.js";
+import type { RouterOutput, RouterSourceBucket } from "./router/routerSchema.js";
 
-function entry(bucket: string, required: boolean, reason: string, task: string): SourceMatrixEntry {
+function entryFromRouter(bucket: RouterSourceBucket, task: string): SourceMatrixEntry {
+  const required = bucket.status === "required";
   return {
-    bucket,
+    bucket: bucket.bucket,
     required,
-    reason,
-    querySeeds: required ? [task, `${bucket} ${task}`] : [],
+    reason: bucket.reason,
+    querySeeds: required ? [task, `${bucket.bucket} ${task}`] : [],
     searchedAtLeastOnce: false
   };
 }
 
-export function buildSourceCoverageMatrix(task: string, classification: TaskClassification = classifyTask(task)): SourceCoverageMatrix {
-  const entries: SourceMatrixEntry[] = [];
-  const defaultResearchRequired = classification.researchHeavy;
-  const broadUpgrade =
-    classification.agentRelevant ||
-    classification.evaluationRelevant ||
-    classification.securityRelevant ||
-    classification.packageRelevant ||
-    classification.frameworkChoice ||
-    classification.productionRelevant;
-
-  entries.push(entry("official_docs", defaultResearchRequired || classification.currentState || classification.frameworkChoice || /\b(api|vendor|docs?|tool)\b/i.test(task), "Primary docs, API references, release notes, and changelogs.", task));
-  entries.push(entry("github", defaultResearchRequired || classification.frameworkChoice || classification.troubleshooting || classification.implementation, "Open-source repos, issues, PRs, examples, and maintainer comments.", task));
-  entries.push(entry("community", defaultResearchRequired || classification.troubleshooting || classification.solutionFinding || classification.frameworkChoice, "Real-world troubleshooting and weak anecdotal evidence.", task));
-  entries.push(entry("academic", classification.academicRelevant || broadUpgrade, "Algorithms, agents, security, distributed systems, evaluation, and performance research.", task));
-  entries.push(entry("package_registry", classification.packageRelevant || classification.agentRelevant || classification.frameworkChoice, "Registry metadata, version risk, package choice, and release compatibility.", task));
-  entries.push(entry("security", classification.securityRelevant || classification.agentRelevant || classification.evaluationRelevant, "Security advisories, CVEs, auth, permissions, sandbox, secrets, and dependency risk.", task));
-  entries.push(entry("blogs_engineering", classification.architectureChoice || classification.solutionFinding || broadUpgrade, "Engineering blogs for architecture, migrations, best practices, and operations.", task));
-  entries.push(entry("competitors", classification.competitorRelevant, "Product, platform, or solution comparisons.", task));
-  entries.push(entry("local_repo", classification.implementation || classification.localRepoRelevant, "Local repository context is required for implementation and current-project research.", task));
-  entries.push(entry("private_connectors", classification.privateConnectorsExplicit, "Private connectors are used only when explicitly requested.", task));
-  entries.push(entry("codex_default_discovery", defaultResearchRequired, "Codex default search intuition must probe for source buckets missed by the matrix.", task));
-
+function unavailableMatrix(task: string, options: BuildSourceCoverageMatrixOptions): SourceCoverageMatrix {
+  const classification = options.diagnosticClassification ?? safetyHeuristics(task);
   return {
     task,
+    rawUserPrompt: options.rawUserPrompt,
+    normalizedTask: options.normalizedTask,
+    classificationInput: options.classificationInput,
+    promptHash: hashText(options.rawUserPrompt ?? task),
+    runId: options.runId,
+    routerStatus: "unavailable",
+    generatedAt: new Date().toISOString(),
+    classification,
+    entries: [],
+    requiredBuckets: [],
+    promptInjectionCaution: "Router output was missing or invalid; do not use keyword fallback for source coverage. Repair router_trace or ask for clarification."
+  };
+}
+
+export interface BuildSourceCoverageMatrixOptions {
+  rawUserPrompt?: string;
+  normalizedTask?: string;
+  classificationInput?: string;
+  runId?: string;
+  routerOutput?: RouterOutput;
+  diagnosticClassification?: TaskClassification;
+}
+
+export function buildSourceCoverageMatrix(task: string, options: BuildSourceCoverageMatrixOptions = {}): SourceCoverageMatrix {
+  const routerOutput = options.routerOutput;
+  if (!routerOutput || !Array.isArray(routerOutput.sourceBuckets) || routerOutput.sourceBuckets.length === 0) {
+    return unavailableMatrix(task, options);
+  }
+  const classification = options.diagnosticClassification ?? safetyHeuristics(task);
+  const entries = routerOutput.sourceBuckets.map((bucket) => entryFromRouter(bucket, task));
+  return {
+    task,
+    rawUserPrompt: options.rawUserPrompt,
+    normalizedTask: options.normalizedTask,
+    classificationInput: options.classificationInput,
+    promptHash: hashText(options.rawUserPrompt ?? task),
+    runId: options.runId,
+    routerStatus: "available",
+    routerOutput,
     generatedAt: new Date().toISOString(),
     classification,
     entries,

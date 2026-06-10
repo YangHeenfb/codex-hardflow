@@ -22,6 +22,9 @@ export type ResearchBucketStatus = "completed" | "searched_but_no_signal" | "fai
 export type ResearchAgentRunStatus = "completed" | "failed" | "timeout" | "spawn_failed" | "context_exhausted" | "manual_fallback";
 export type ResearchReportOwner = "parent" | "subagent";
 export type SubagentReportStatus = "completed" | "timeout" | "failed" | "searched_but_no_signal";
+export type TriggerSource = "hook_user_prompt_submit" | "cli_command" | "manual_user_request" | "agents_md_only" | "skill_only" | "unknown";
+export type SubagentStatus = "spawned" | "not_spawned" | "unavailable" | "failed" | "not_applicable";
+export type SubagentTriggerSource = "app_tool" | "sdk_threads" | "manual" | "none";
 
 export interface TaskClassification {
   researchHeavy: boolean;
@@ -58,6 +61,10 @@ export interface SourceCoverageMatrix {
   rawUserPrompt?: string;
   normalizedTask?: string;
   classificationInput?: string;
+  promptHash?: string;
+  runId?: string;
+  routerStatus?: "available" | "unavailable";
+  routerOutput?: unknown;
   generatedAt: string;
   classification: TaskClassification;
   entries: SourceMatrixEntry[];
@@ -115,15 +122,24 @@ export interface ResearchReport {
   turnId: string;
   generatedAt: string;
   taskType: string;
+  triggerSource: TriggerSource;
+  programmaticTrigger: boolean;
   status: ResearchReportStatus;
   runner_mode: ResearchRunnerMode;
+  strict_programmatic?: boolean;
   app_handoff_required: boolean;
   sdk_threads_started: boolean;
   sdk_threads_allowed: boolean;
   subagent_instruction_injected: boolean;
   manual_backfill_required: boolean;
   manual_fallback_reason?: string;
-  subagent_status?: "available" | "unavailable" | "not_loaded" | "failed";
+  subagent_status: SubagentStatus;
+  subagent_trigger_source: SubagentTriggerSource;
+  subagent_skip_reason?: string;
+  router_trace_reused: boolean;
+  router_trace_path?: string;
+  router_trace_reuse_reason?: string;
+  router_trace_stale_reason?: string;
   source_matrix: SourceCoverageMatrix;
   required_buckets: string[];
   bucket_statuses: Record<string, ResearchBucketStatus>;

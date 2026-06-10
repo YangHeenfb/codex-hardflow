@@ -4,7 +4,10 @@ import { currentResearchReportPath, executorManifestPath, legacyResearchReportPa
 import type { CodexDefaultDiscoveryStatus, ResearchAgentRun, ResearchBucketStatus, ResearchReport, ResearcherReport, ValidationSummary } from "../schemas.js";
 import { sanitizeText } from "../sanitizer.js";
 import { incrementBlockCount, markerExpired, resolveCurrentMarker, updateMarker, type HookMarker } from "../hookState.js";
+import { appendHookEvent, assertHookActive } from "../hookEvents.js";
 import { assertResearchReportEvidence } from "../researchOrchestrator.js";
+import { readRouterTrace } from "../router/routerTrace.js";
+import type { RouterOutput } from "../router/routerSchema.js";
 
 type GateOutput = Record<string, unknown>;
 
@@ -107,6 +110,16 @@ function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid
   if (!report.generatedAt || Date.parse(report.generatedAt) < Date.parse(marker.createdAt)) {
     return { valid: false, reason: "research_report.json was generated before the current hardflow marker." };
   }
+  if (report.programmaticTrigger !== true) {
+    return { valid: false, reason: "research_report cannot claim hardflow completion because programmaticTrigger is not true." };
+  }
+  if (report.triggerSource === "agents_md_only" || report.triggerSource === "skill_only" || report.triggerSource === "unknown") {
+    return { valid: false, reason: `research_report triggerSource=${report.triggerSource} cannot claim programmatic hardflow completion.` };
+  }
+  const active = assertHookActive(cwd, report.runId);
+  if (!active.passed) {
+    return { valid: false, reason: active.reason };
+  }
   if (!report.source_matrix || !Array.isArray(report.source_matrix.entries)) {
     return { valid: false, reason: "research_report.json is missing source_matrix entries." };
   }
@@ -121,8 +134,8 @@ function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid
   }
   const pointer = validateCurrentPointer(cwd, report);
   if (!pointer.valid) return pointer;
-  if (report.subagent_status === "available" && report.runner_mode === "manual_fallback" && !report.agent_runs.some((run) => run.status !== "manual_fallback")) {
-    return { valid: false, reason: "Subagent capability was available, but no subagents or SDK runner were used. Rerun with explicit subagents or SDK threads." };
+  if (report.subagent_status === "spawned" && report.subagent_trigger_source === "app_tool" && !report.agent_runs.some((run) => !run.fallback_used)) {
+    return { valid: false, reason: "research_report claims subagents spawned, but no non-fallback subagent run was recorded." };
   }
   const requiredBuckets = report.source_matrix.requiredBuckets?.length
     ? report.source_matrix.requiredBuckets
@@ -163,51 +176,90 @@ export function stopValidationGate(input: Record<string, unknown> = {}): Record<
   const marker = resolveCurrentMarker(input, cwd);
   if (!marker) return { decision: "allow" };
 
+  function finish(result: Record<string, unknown>, reason?: string): Record<string, unknown> {
+    appendHookEvent(cwd, {
+      eventName: "Stop",
+      runId: marker?.runId,
+      turnId: marker?.turnId,
+      promptHash: marker?.promptHash,
+      triggerSource: marker?.triggerSource,
+      programmaticTrigger: marker?.programmaticTrigger,
+      decision: typeof result.decision === "string" ? result.decision : undefined,
+      reason: reason ?? (typeof result.reason === "string" ? result.reason : typeof result.notice === "string" ? result.notice : undefined)
+    });
+    return result;
+  }
+
   if (markerExpired(marker)) {
     updateMarker(marker, { status: "expired" });
-    return { decision: "allow", notice: "codex-hardflow marker expired; Stop gate allowed." };
+    return finish({ decision: "allow", notice: "codex-hardflow marker expired; Stop gate allowed." });
   }
-  if (marker.status === "completed" || marker.status === "expired") return { decision: "allow" };
-  if (marker.bypass || marker.status === "bypassed") return { decision: "allow", notice: "codex-hardflow bypass marker allowed Stop." };
+  if (marker.status === "completed" || marker.status === "expired") return finish({ decision: "allow" });
+  if (marker.bypass || marker.status === "bypassed") return finish({ decision: "allow", notice: "codex-hardflow bypass marker allowed Stop." });
   if (marker.taskType === "hardflow-maintenance" && !marker.requiresValidation) {
     updateMarker(marker, { status: "completed" });
-    return { decision: "allow", notice: "codex-hardflow maintenance marker does not require business executor_manifest.json." };
+    return finish({ decision: "allow", notice: "codex-hardflow maintenance marker does not require business executor_manifest.json." });
   }
 
-  if (marker.requiresSourceMatrix) {
-    const report = validateCurrentResearchReport(cwd, marker);
-    if (!report.valid) return blockOrAllow(marker, report.reason ?? "research_report.json does not satisfy the current hardflow marker.");
+  const trace = readRouterTrace(cwd, marker.runId, marker.turnId);
+  const routerOutput: RouterOutput | undefined = trace?.routerOutput;
+  if (trace && (trace.owner ?? "parent") === "subagent" && (marker.requiresSourceMatrix || marker.requiresExecutorManifest || marker.requiresValidation)) {
+    return finish(blockOrAllow(marker, "Parent router_trace is missing for this hardflow marker; a subagent router_trace cannot satisfy the parent Stop gate."));
   }
-
-  if (marker.requiresExecutorManifest && !existsSync(executorManifestPath(cwd))) {
-    return blockOrAllow(marker, "executor_manifest.json is missing for this implementation marker. Generate .agent/manifests/executor_manifest.json before stopping.");
+  if (!routerOutput && (marker.requiresSourceMatrix || marker.requiresExecutorManifest || marker.requiresValidation)) {
+    return finish(blockOrAllow(marker, "router_trace/routerOutput is missing for this hardflow marker. Generate .agent/reports/runs/<runId>/router_trace.json; do not use keyword fallback."));
   }
-
-  if (!marker.requiresValidation) {
+  if (routerOutput?.route === "router_failed") {
     updateMarker(marker, { status: "completed" });
-    return { decision: "allow" };
+    return finish({ decision: "allow", notice: "Router failed; hardflow classification was not claimed. Ask for confirmation before code changes." });
+  }
+  if (routerOutput?.route === "bypass" || routerOutput?.bypass.requested) {
+    updateMarker(marker, { status: "completed" });
+    return finish({ decision: "allow", notice: "Router selected bypass; Stop gate allowed." });
+  }
+
+  const requiresSourceMatrix = routerOutput?.requiresSourceMatrix ?? marker.requiresSourceMatrix;
+  const requiresExecutorManifest = routerOutput?.requiresExecutorManifest ?? marker.requiresExecutorManifest;
+  const requiresValidation = routerOutput?.requiresValidation ?? marker.requiresValidation;
+  const requiresFinalHoldout = routerOutput?.requiresFinalHoldout ?? false;
+
+  if (requiresSourceMatrix) {
+    const report = validateCurrentResearchReport(cwd, marker);
+    if (!report.valid) return finish(blockOrAllow(marker, report.reason ?? "research_report.json does not satisfy the current hardflow marker."));
+  }
+
+  if (requiresExecutorManifest && !existsSync(executorManifestPath(cwd))) {
+    return finish(blockOrAllow(marker, "executor_manifest.json is missing for this implementation marker. Generate .agent/manifests/executor_manifest.json before stopping."));
+  }
+
+  if (!requiresValidation && !requiresFinalHoldout) {
+    updateMarker(marker, { status: "completed" });
+    return finish({ decision: "allow" });
   }
 
   if (!existsSync(validationSummaryPath(cwd))) {
-    return blockOrAllow(marker, "validation_summary.json is missing for this validation-sensitive marker. Run codex-hardflow validate.");
+    return finish(blockOrAllow(marker, "validation_summary.json is missing for this validation-sensitive marker. Run codex-hardflow validate."));
   }
 
   const summary = parseJson<ValidationSummary>(validationSummaryPath(cwd));
-  if (!summary) return blockOrAllow(marker, "validation_summary.json is not valid JSON.");
+  if (!summary) return finish(blockOrAllow(marker, "validation_summary.json is not valid JSON."));
   if (summary.hidden_status === "failed") {
     const action = summary.iteration >= DEFAULT_LOOP_CONFIG.max_repair_cycles ? "stop" : "repair";
-    return blockOrAllow(marker, action === "stop" ? "Max repair cycles reached; ask the user before continuing." : sanitizeText(summary.next_repair_prompt));
+    return finish(blockOrAllow(marker, action === "stop" ? "Max repair cycles reached; ask the user before continuing." : sanitizeText(summary.next_repair_prompt)));
   }
   if (summary.hidden_status === "passed" && summary.final_holdout_status === "not_run") {
-    return blockOrAllow(marker, "Hidden validation passed, but final holdout has not run. Run final holdout before stopping.");
+    return finish(blockOrAllow(marker, "Hidden validation passed, but final holdout has not run. Run final holdout before stopping."));
+  }
+  if (requiresFinalHoldout && summary.hidden_status !== "not_configured" && summary.final_holdout_status !== "passed") {
+    return finish(blockOrAllow(marker, "Router requires final holdout, but final_holdout_status is not passed."));
   }
   if (summary.final_holdout_status === "failed") {
-    return blockOrAllow(marker, summary.iteration >= DEFAULT_LOOP_CONFIG.max_repair_cycles ? "Final holdout failed after max repair cycles; ask the user before continuing." : "Final holdout failed. Continue repair loop using sanitized feedback.");
+    return finish(blockOrAllow(marker, summary.iteration >= DEFAULT_LOOP_CONFIG.max_repair_cycles ? "Final holdout failed after max repair cycles; ask the user before continuing." : "Final holdout failed. Continue repair loop using sanitized feedback."));
   }
   if (summary.hidden_status === "not_configured") {
     updateMarker(marker, { status: "completed" });
-    return { decision: "allow", notice: "Hidden validator is not configured; do not claim hidden validation passed." };
+    return finish({ decision: "allow", notice: "Hidden validator is not configured; do not claim hidden validation passed." });
   }
   updateMarker(marker, { status: "completed" });
-  return { decision: "allow" };
+  return finish({ decision: "allow" });
 }

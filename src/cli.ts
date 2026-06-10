@@ -6,7 +6,10 @@ import { spawnSync } from "node:child_process";
 import { cliPathStatus } from "./cliPaths.js";
 import { codexRunnerStatus } from "./codexRunner.js";
 import { installGlobal, SDK_VERSION } from "./config.js";
+import { evaluateCoverage } from "./coverageEval.js";
 import { requireExecutorManifest } from "./executionOrchestrator.js";
+import { parseFlagArgs, type ParsedFlags } from "./flagParser.js";
+import { appendHookEvent, assertHookActive, hookStatus } from "./hookEvents.js";
 import { cleanWorkspaceStrategy, hasHeadCommit } from "./gitUtils.js";
 import { stopValidationGate } from "./hooks/stopValidationGate.js";
 import { preToolUsePrivatePathGuard } from "./hooks/preToolUsePrivatePathGuard.js";
@@ -17,46 +20,28 @@ import { planParallelModules } from "./parallelOrchestrator.js";
 import { codexHome, privateStoreRoot, skillPathStrategy, validationSummaryPath } from "./paths.js";
 import { runLogprobsProbe } from "./probes/logprobsProbe.js";
 import { addManualSourceToReport, addSubagentReport, assertResearchReportEvidence, finalizeManualReport, loadResearchReport, mergeSubagentReports, researchReportSummary, runResearch } from "./researchOrchestrator.js";
+import { runLlmRouter } from "./router/llmRouter.js";
+import type { RouterTraceOwner } from "./router/routerSchema.js";
 import type { Confidence, ResearchRunnerMode, ResearchSource, SubagentReportStatus } from "./schemas.js";
 import { validate } from "./validationOrchestrator.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string; dependencies?: Record<string, string> };
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const cliEntrypointUsed = fileURLToPath(import.meta.url);
 
 function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function parseFlagArgs(args: string[]): { flags: Record<string, string | true>; rest: string[] } {
-  const flags: Record<string, string | true> = {};
-  const rest: string[] = [];
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg?.startsWith("--")) {
-      const key = arg.slice(2);
-      const next = args[i + 1];
-      if (next && !next.startsWith("--")) {
-        flags[key] = next;
-        i += 1;
-      } else {
-        flags[key] = true;
-      }
-    } else if (arg) {
-      rest.push(arg);
-    }
-  }
-  return { flags, rest };
-}
-
-function stringFlag(flags: Record<string, string | true>, key: string, required = false): string | undefined {
+function stringFlag(flags: ParsedFlags, key: string, required = false): string | undefined {
   const value = flags[key];
   if (typeof value === "string") return value;
   if (required) throw new Error(`Missing --${key}`);
   return undefined;
 }
 
-function numberFlag(flags: Record<string, string | true>, key: string): number | undefined {
+function numberFlag(flags: ParsedFlags, key: string): number | undefined {
   const value = stringFlag(flags, key);
   if (value === undefined) return undefined;
   const parsed = Number(value);
@@ -64,13 +49,19 @@ function numberFlag(flags: Record<string, string | true>, key: string): number |
   return parsed;
 }
 
-function booleanFlag(flags: Record<string, string | true>, key: string): boolean {
+function booleanFlag(flags: ParsedFlags, key: string): boolean {
   const value = flags[key];
   return value === true || value === "true" || value === "1";
 }
 
 function validRunnerMode(value: string | undefined): value is ResearchRunnerMode {
   return value === "app_handoff" || value === "sdk_threads" || value === "manual_fallback" || value === "mixed";
+}
+
+function routerOwnerFlag(value: string | undefined): RouterTraceOwner {
+  if (value === undefined) return "parent";
+  if (value === "parent" || value === "subagent") return value;
+  throw new Error(`Invalid --owner: ${value}`);
 }
 
 async function readStdinJson(): Promise<Record<string, unknown>> {
@@ -116,7 +107,7 @@ function sourceArrayField(input: Record<string, unknown>, keys: string[]): Resea
   return undefined;
 }
 
-function pickString(flags: Record<string, string | true>, input: Record<string, unknown>, flagKeys: string[], jsonKeys: string[], required = false): string | undefined {
+function pickString(flags: ParsedFlags, input: Record<string, unknown>, flagKeys: string[], jsonKeys: string[], required = false): string | undefined {
   for (const flag of flagKeys) {
     const value = stringFlag(flags, flag);
     if (value) return value;
@@ -126,7 +117,7 @@ function pickString(flags: Record<string, string | true>, input: Record<string, 
   return value;
 }
 
-function pickStringArray(flags: Record<string, string | true>, input: Record<string, unknown>, flagKey: string, jsonKeys: string[]): string[] | undefined {
+function pickStringArray(flags: ParsedFlags, input: Record<string, unknown>, flagKey: string, jsonKeys: string[]): string[] | undefined {
   const fromFlag = stringFlag(flags, flagKey);
   const fromJson = stringArrayField(input, jsonKeys) ?? [];
   return fromFlag ? [...fromJson, fromFlag] : fromJson.length > 0 ? fromJson : undefined;
@@ -145,6 +136,10 @@ export function status(cwd: string, root = sourceRoot): Record<string, unknown> 
   const strategy = skillPathStrategy();
   const pathStatus = cliPathStatus(root);
   return {
+    sourceRoot: root,
+    distPath: resolve(root, "dist", "cli.js"),
+    binPath: resolve(root, "bin", "codex-hardflow"),
+    cliEntrypointUsed,
     packageVersion: packageJson.version,
     codexCli: codexVersion.status === 0 ? codexVersion.stdout.trim() : "unavailable",
     absoluteCliAvailable: pathStatus.absoluteCliAvailable,
@@ -154,6 +149,10 @@ export function status(cwd: string, root = sourceRoot): Record<string, unknown> 
     appPathAvailable: pathStatus.appPathAvailable,
     absoluteCommand: pathStatus.absoluteCommand,
     wrapperPath: pathStatus.wrapperPath,
+    globalWrapperPath: pathStatus.globalWrapperPath,
+    globalWrapperTarget: pathStatus.globalWrapperTarget,
+    wrapperPointsToCurrentSourceRoot: pathStatus.wrapperPointsToCurrentSourceRoot,
+    wrapperVersion: pathStatus.wrapperVersion,
     sdk: codexRunnerStatus(),
     sdkPinned: packageJson.dependencies?.["@openai/codex-sdk"] === SDK_VERSION,
     codexHome: codexHome(),
@@ -203,13 +202,20 @@ function verifySelf(cwd: string): Record<string, unknown> {
   });
   const forbiddenUserPath = ["", "Users", "yang"].join("/");
   const grep = spawnSync("rg", [forbiddenUserPath, "src", "bin"], { cwd, encoding: "utf8" });
+  const pathStatus = cliPathStatus(sourceRoot);
+  const globalWrapperFresh = pathStatus.globalWrapperTarget === null || pathStatus.wrapperPointsToCurrentSourceRoot;
   return {
     packDryRunPassed: pack.status === 0,
     packCheck,
     hookJsonValid,
+    globalWrapperFresh,
+    globalWrapperPath: pathStatus.globalWrapperPath,
+    globalWrapperTarget: pathStatus.globalWrapperTarget,
+    wrapperPointsToCurrentSourceRoot: pathStatus.wrapperPointsToCurrentSourceRoot,
+    wrapperWarning: globalWrapperFresh ? undefined : "global codex-hardflow wrapper is stale; run node dist/cli.js install-global",
     noRuntimeUserPathInSource: grep.status === 1,
     noRuntimeUserPathMatches: grep.stdout.trim().split("\n").filter(Boolean),
-    passed: pack.status === 0 && packCheck.passed && hookJsonValid && grep.status === 1
+    passed: pack.status === 0 && packCheck.passed && hookJsonValid && grep.status === 1 && globalWrapperFresh
   };
 }
 
@@ -222,6 +228,51 @@ async function main(): Promise<void> {
       case "status":
         printJson(status(cwd));
         return;
+      case "route": {
+        const parsed = parseFlagArgs(args);
+        const task = parsed.rest.join(" ");
+        if (!task) throw new Error("Usage: codex-hardflow route [--owner parent|subagent] \"task...\"");
+        const runId = stringFlag(parsed.flags, "run-id");
+        const owner = routerOwnerFlag(stringFlag(parsed.flags, "owner"));
+        const parentRunId = stringFlag(parsed.flags, "parent-run-id");
+        const subagentName = stringFlag(parsed.flags, "subagent-name");
+        const bucket = stringFlag(parsed.flags, "bucket");
+        const writeTrace = Object.hasOwn(parsed.flags, "write-trace") ? booleanFlag(parsed.flags, "write-trace") : Boolean(runId) || Boolean(parentRunId);
+        const result = await runLlmRouter(
+          {
+            rawUserPrompt: stringFlag(parsed.flags, "raw-user-prompt") ?? task,
+            normalizedTask: task,
+            currentRunId: runId,
+            triggerSource: "cli_command",
+            programmaticTrigger: true
+          },
+          {
+            cwd,
+            timeoutMs: numberFlag(parsed.flags, "timeout"),
+            turnId: stringFlag(parsed.flags, "turn-id"),
+            writeTrace,
+            owner,
+            parentRunId,
+            subagentName,
+            bucket,
+            triggerSource: "cli_command",
+            programmaticTrigger: true
+          }
+        );
+        if (result.trace.runId) {
+          appendHookEvent(cwd, {
+            eventName: "CLI",
+            command: "route",
+            runId: result.trace.runId,
+            turnId: result.trace.turnId,
+            promptHash: result.trace.promptHash,
+            triggerSource: "cli_command",
+            programmaticTrigger: true
+          });
+        }
+        printJson(result.trace);
+        return;
+      }
       case "research": {
         const parsed = parseFlagArgs(args);
         const task = parsed.rest.join(" ");
@@ -231,7 +282,8 @@ async function main(): Promise<void> {
           if (requestedRunner) throw new Error(`Invalid --runner: ${requestedRunner}`);
         }
         if (requestedRunner === "mixed") throw new Error("--runner mixed is a report state; use app_handoff, manual_fallback, or sdk_threads.");
-        const executeSdkResearch = booleanFlag(parsed.flags, "execute-sdk-research");
+        const strictProgrammatic = booleanFlag(parsed.flags, "strict-programmatic");
+        const executeSdkResearch = booleanFlag(parsed.flags, "execute-sdk-research") || strictProgrammatic;
         if (executeSdkResearch && requestedRunner && requestedRunner !== "sdk_threads") {
           throw new Error("--execute-sdk-research conflicts with non-sdk --runner.");
         }
@@ -248,6 +300,8 @@ async function main(): Promise<void> {
             runId: stringFlag(parsed.flags, "run-id"),
             runnerMode,
             executeSdkResearch,
+            strictProgrammatic,
+            runRouter: booleanFlag(parsed.flags, "run-router"),
             maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
             perBucketTimeoutMs: numberFlag(parsed.flags, "per-bucket-timeout"),
             globalBudgetMs: numberFlag(parsed.flags, "global-budget"),
@@ -339,6 +393,36 @@ async function main(): Promise<void> {
         }
         throw new Error("Usage: codex-hardflow report <add-source|finalize-manual|add-subagent-report|merge-subagents|status|show|assert-evidence>");
       }
+      case "hooks": {
+        const subcommand = args[0];
+        const parsed = parseFlagArgs(args.slice(1));
+        if (subcommand === "status") {
+          printJson(hookStatus(cwd, stringFlag(parsed.flags, "run-id")));
+          return;
+        }
+        if (subcommand === "assert-active") {
+          const runId = stringFlag(parsed.flags, "run-id", true) ?? "";
+          const result = assertHookActive(cwd, runId);
+          printJson(result);
+          if (!result.passed) process.exitCode = 1;
+          return;
+        }
+        throw new Error("Usage: codex-hardflow hooks <status|assert-active> [--run-id <runId>]");
+      }
+      case "eval": {
+        const subcommand = args[0];
+        const parsed = parseFlagArgs(args.slice(1));
+        if (subcommand === "coverage") {
+          printJson(
+            evaluateCoverage(cwd, {
+              runId: stringFlag(parsed.flags, "run-id", true) ?? "",
+              baselineRunId: stringFlag(parsed.flags, "baseline-run-id")
+            })
+          );
+          return;
+        }
+        throw new Error("Usage: codex-hardflow eval coverage --run-id <runId> [--baseline-run-id <runId>]");
+      }
       case "implement": {
         const task = args.join(" ");
         if (!task) throw new Error("Usage: codex-hardflow implement \"task...\"");
@@ -407,7 +491,11 @@ async function main(): Promise<void> {
         printJson({
           usage: [
             "codex-hardflow status",
-            "codex-hardflow research [--run-id <runId>] [--runner app_handoff|sdk_threads|manual_fallback] [--execute-sdk-research] \"task...\"",
+            "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
+            "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",
+            "codex-hardflow research --run-id <runId> --runner app_handoff --run-router \"task...\"",
+            "codex-hardflow research --run-id <runId> --strict-programmatic \"task...\"",
+            "research reuses an existing parent router_trace for the same runId by default; --run-router explicitly reruns router; --write-trace is boolean and does not consume task text.",
             "codex-hardflow report add-source [--run-id <runId>] --bucket <bucket> --title <title> --url <url> --claim <claim>",
             "codex-hardflow report finalize-manual [--run-id <runId>] [--useful-finding text]",
             "codex-hardflow report add-subagent-report [--run-id <parentRunId>] --agent <agent> --bucket <bucket> --status <status>",
@@ -415,6 +503,9 @@ async function main(): Promise<void> {
             "codex-hardflow report status",
             "codex-hardflow report show",
             "codex-hardflow report assert-evidence",
+            "codex-hardflow hooks status [--run-id <runId>]",
+            "codex-hardflow hooks assert-active --run-id <runId>",
+            "codex-hardflow eval coverage --run-id <runId> [--baseline-run-id <runId>]",
             "codex-hardflow implement \"task...\"",
             "codex-hardflow validate",
             "codex-hardflow probe-logprobs",

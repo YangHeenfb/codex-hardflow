@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join, resolve } from "node:path";
 import { cliPathStatus } from "./cliPaths.js";
 import { executorManifestPath, hardflowStateDir, repoHash, researchRunReportPath, validationSummaryPath } from "./paths.js";
+import type { TriggerSource } from "./schemas.js";
 
 export type HookMarkerStatus = "active" | "completed" | "bypassed" | "expired";
-export type HookTaskType = "research-heavy" | "implementation" | "validation-sensitive" | "hardflow-maintenance" | "bypass";
+export type HookTaskType = "router-preflight" | "research-heavy" | "implementation" | "validation-sensitive" | "hardflow-maintenance" | "bypass";
 
 export interface HookMarker {
   turnId: string;
@@ -13,6 +14,8 @@ export interface HookMarker {
   cwdHash: string;
   promptHash: string;
   taskType: HookTaskType;
+  triggerSource: TriggerSource;
+  programmaticTrigger: boolean;
   createdAt: string;
   expiresAt: string;
   status: HookMarkerStatus;
@@ -48,6 +51,8 @@ export interface CreateHookMarkerOptions {
   ttlMs?: number;
   maxBlocks?: number;
   runId?: string;
+  triggerSource?: TriggerSource;
+  programmaticTrigger?: boolean;
 }
 
 interface ThreadIndex {
@@ -152,6 +157,8 @@ export function createHookMarker(options: CreateHookMarkerOptions): HookMarker {
     cwdHash,
     promptHash,
     taskType: options.taskType,
+    triggerSource: options.triggerSource ?? "unknown",
+    programmaticTrigger: options.programmaticTrigger ?? false,
     createdAt,
     expiresAt: new Date(Date.parse(createdAt) + (options.ttlMs ?? DEFAULT_TTL_MS)).toISOString(),
     status: options.bypass ? "bypassed" : "active",
