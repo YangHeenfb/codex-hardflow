@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { buildCoveragePlan } from "../src/coverage/coveragePlan.js";
 import { addEvidence, evidenceByBucket, evidenceByPerspective, evidenceByQuestion, listEvidence } from "../src/coverage/evidenceLedger.js";
 import { searchEnginesForBucket } from "../src/coverage/searchEngineRegistry.js";
-import { evaluateCoverage } from "../src/coverageEval.js";
+import { evaluateCoverage, selectCoverageRun } from "../src/coverageEval.js";
 import { researchRunCoveragePlanPath, researchRunEvidenceLedgerPath } from "../src/paths.js";
 import { addManualSourceToReport, addSubagentReport, mergeSubagentReports, runResearch } from "../src/researchOrchestrator.js";
 import { broadResearchRouterOutput, currentProjectCompetitorRouterOutput } from "./routerFixtures.js";
@@ -46,10 +46,31 @@ describe("CoveragePlan and EvidenceLedger", () => {
     });
 
     expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "local_repo")).toMatchObject({ required: true, priority: "critical" });
-    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "competitors")).toMatchObject({ required: true, priority: "critical" });
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "competitors")).toMatchObject({
+      required: true,
+      priority: "critical",
+      expectedEngines: expect.arrayContaining(["competitor_official_docs", "competitor_github"])
+    });
     expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "official_docs")?.priority).toBe("normal");
     expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "github")?.priority).toBe("normal");
     expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "codex_default_discovery")?.priority).toBe("normal");
+  });
+
+  it("registers competitors engines with required metadata", () => {
+    const engines = searchEnginesForBucket("competitors");
+    expect(engines.map((engine) => engine.name)).toEqual(
+      expect.arrayContaining(["competitor_official_docs", "competitor_github", "competitor_engineering_blogs", "competitor_product_docs"])
+    );
+    for (const engine of engines) {
+      expect(engine.bucket).toBe("competitors");
+      expect(engine.description.length).toBeGreaterThan(10);
+      expect(engine.available).toBe(true);
+      expect(engine.deterministic).toBe(false);
+      expect(engine.requiresNetwork).toBe(true);
+      expect(engine.expectedOutputSchema).toBeTruthy();
+      expect(engine.defaultLimit).toBe(5);
+      expect(engine.riskLevel).toBe("medium");
+    }
   });
 
   it("lists registered engines and records unavailable engines in plans", () => {
@@ -150,9 +171,14 @@ describe("CoveragePlan and EvidenceLedger", () => {
     }
 
     const result = evaluateCoverage(cwd, { runId: report.runId });
+    expect(result.selectedRunId).toBe(report.runId);
+    expect(result.selectedRunReason).toBe("explicit --run-id");
     expect(result.completedBucketCount).toBe(result.requiredBucketCount);
+    expect(result.completedOrBackfilledBucketCount).toBe(result.requiredBucketCount);
     expect(result.evidenceGatePassed).toBe(true);
     expect(result.uniqueSourceCount).toBe(report.required_buckets.length);
+    expect(result.baselinePresent).toBe(false);
+    expect(result.broaderThanDefaultClaimAllowed).toBe(false);
   });
 
   it("does not require App subagent spawn when EvidenceLedger satisfies required buckets", async () => {
@@ -177,6 +203,8 @@ describe("CoveragePlan and EvidenceLedger", () => {
 
     const result = evaluateCoverage(cwd, { runId: report.runId });
     expect(result.subagentSpawnedCount).toBe(0);
+    expect(result.programmaticTrigger).toBe(true);
+    expect(result.programmaticMultiAgent).toBe(false);
     expect(result.evidenceGatePassed).toBe(true);
     expect(result.bucketCoverageRatio).toBe(1);
   });
@@ -206,5 +234,140 @@ describe("CoveragePlan and EvidenceLedger", () => {
     expect(result.evidenceGatePassed).toBe(false);
     expect(result.coverage_claim).toBe("hardflow coverage is broad by configured matrix");
     expect(result.coverage_claim).not.toContain("default Codex search");
+  });
+
+  it("default coverage eval ignores plumbing/test/audit runs and selects latest evidence parent run", async () => {
+    const cwd = tempRepo();
+    const ignored = await runResearch("research ignored test plumbing", cwd, {
+      sourceRoot: process.cwd(),
+      runId: "run-coverage-audit-test",
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-ignored" }
+    });
+    addManualSourceToReport(cwd, {
+      runId: ignored.runId,
+      bucket: "official_docs",
+      title: "Ignored source",
+      url_or_ref: "https://example.com/ignored",
+      claim: "Ignored test run source."
+    });
+
+    const selected = await runResearch("research selected latest evidence", cwd, {
+      sourceRoot: process.cwd(),
+      runId: "run-selected-evidence",
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-selected" }
+    });
+    addManualSourceToReport(cwd, {
+      runId: selected.runId,
+      bucket: "official_docs",
+      title: "Selected source",
+      url_or_ref: "https://example.com/selected",
+      claim: "Selected run source."
+    });
+
+    const result = evaluateCoverage(cwd, {});
+    expect(result.selectedRunId).toBe(selected.runId);
+    expect(result.selectedRunReason).toContain("selected latest evidence-bearing parent run");
+  });
+
+  it("default coverage eval can include test runs when requested", async () => {
+    const cwd = tempRepo();
+    const testRun = await runResearch("research selected test run", cwd, {
+      sourceRoot: process.cwd(),
+      runId: "run-test-evidence",
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-test-selected" }
+    });
+    addManualSourceToReport(cwd, {
+      runId: testRun.runId,
+      bucket: "official_docs",
+      title: "Test source",
+      url_or_ref: "https://example.com/test",
+      claim: "Test run source."
+    });
+
+    expect(selectCoverageRun(cwd, { includeTestRuns: true }).runId).toBe(testRun.runId);
+  });
+
+  it("default coverage eval errors when no evidence-bearing parent run exists", () => {
+    const cwd = tempRepo();
+    expect(() => evaluateCoverage(cwd, {})).toThrow("No evidence-bearing parent research run found; pass --run-id.");
+  });
+
+  it("valid baseline computes delta metrics and enables broader-than-default comparison", async () => {
+    const cwd = tempRepo();
+    const baseline = await runResearch("research baseline", cwd, {
+      sourceRoot: process.cwd(),
+      runId: "run-baseline",
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-baseline" }
+    });
+    addManualSourceToReport(cwd, {
+      runId: baseline.runId,
+      bucket: "official_docs",
+      title: "Baseline docs",
+      source_type: "official_docs",
+      url_or_ref: "https://example.com/baseline",
+      claim: "Baseline docs reviewed."
+    });
+    const hardflow = await runResearch("research hardflow", cwd, {
+      sourceRoot: process.cwd(),
+      runId: "run-hardflow-baseline-compare",
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-hardflow-baseline" }
+    });
+    for (const bucket of hardflow.required_buckets) {
+      addManualSourceToReport(cwd, {
+        runId: hardflow.runId,
+        bucket,
+        title: `${bucket} source`,
+        source_type: bucket,
+        url_or_ref: `https://example.com/${bucket}`,
+        claim: `${bucket} source reviewed.`
+      });
+    }
+
+    const result = evaluateCoverage(cwd, { runId: hardflow.runId, baselineRunId: baseline.runId });
+    expect(result.baselinePresent).toBe(true);
+    expect(result.broaderThanDefaultClaimAllowed).toBe(true);
+    expect(result.deltaSourceCount).toBeGreaterThan(0);
+    expect(result.deltaBucketCoverageRatio).toBeGreaterThan(0);
+    expect(result.deltaCoverageScore).toBeDefined();
+  });
+
+  it("invalid empty baseline does not allow broader-than-default claims", async () => {
+    const cwd = tempRepo();
+    const baseline = await runResearch("research empty baseline", cwd, {
+      sourceRoot: process.cwd(),
+      runId: "run-empty-baseline",
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-empty-baseline" }
+    });
+    const hardflow = await runResearch("research hardflow no baseline claim", cwd, {
+      sourceRoot: process.cwd(),
+      runId: "run-hardflow-no-baseline-claim",
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-hardflow-no-baseline" }
+    });
+    addManualSourceToReport(cwd, {
+      runId: hardflow.runId,
+      bucket: "official_docs",
+      title: "Hardflow docs",
+      source_type: "official_docs",
+      url_or_ref: "https://example.com/hardflow",
+      claim: "Hardflow docs reviewed."
+    });
+
+    const result = evaluateCoverage(cwd, { runId: hardflow.runId, baselineRunId: baseline.runId });
+    expect(result.baselinePresent).toBe(false);
+    expect(result.broaderThanDefaultClaimAllowed).toBe(false);
   });
 });

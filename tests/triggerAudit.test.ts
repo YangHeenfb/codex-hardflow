@@ -158,8 +158,10 @@ describe("programmatic trigger audit", () => {
     });
 
     expect(report.strict_programmatic).toBe(true);
-    expect(report.runner_mode).toBe("sdk_threads");
+    expect(report.runner_mode).toBe("strict_programmatic");
+    expect(report.evidence_mode).toBe("none");
     expect(report.status).toBe("failed");
+    expect(report.failure_reason).toBe("sdk_threads runner unavailable");
     expect(report.manual_fallback_reason).toBeUndefined();
     expect(report.subagent_trigger_source).toBe("sdk_threads");
   });

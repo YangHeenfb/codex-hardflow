@@ -5,15 +5,22 @@ Use coverage eval to inspect whether a hardflow run covered the configured Cover
 ## Commands
 
 ```sh
+codex-hardflow eval coverage
+codex-hardflow eval coverage --latest-evidence-run
 codex-hardflow eval coverage --run-id <hardflowRunId>
 codex-hardflow eval coverage --run-id <hardflowRunId> --baseline-run-id <baselineRunId>
+codex-hardflow eval coverage --include-test-runs
 ```
 
-When `.agent/reports/runs/<runId>/coverage_plan.json` and `evidence_ledger.json` exist, eval uses them first. The output includes bucket coverage, question coverage, perspective coverage, engine diversity, source diversity, primary-source counts, weak community signal counts, GitHub/academic/security/package/local-repo counts, codex_default_discovery presence, searched-but-no-signal records, subagent spawned count, manual backfill count, evidence gate status, and `coverage_score`.
+When no `--run-id` is supplied, eval selects the latest evidence-bearing parent run. It excludes plumbing/test/audit/dry-run/router-only runs by default. Use `--include-test-runs` only when intentionally evaluating test fixtures. If no evidence-bearing parent run exists, pass `--run-id`.
+
+When `.agent/reports/runs/<runId>/coverage_plan.json` and `evidence_ledger.json` exist, eval uses them first. The output includes selected run metadata, bucket coverage, completed/backfilled bucket count, question coverage, perspective coverage, engine diversity, source diversity, primary-source counts, weak community signal counts, GitHub/academic/security/package/local-repo counts, codex_default_discovery presence, searched-but-no-signal records, subagent spawned count, manual backfill count, `programmaticTrigger`, `programmaticMultiAgent`, evidence gate status, and `coverage_score`.
 
 When no CoveragePlan exists, eval falls back to the legacy research report metrics.
 
-App subagents are optional workers, not the coverage mechanism. A run can satisfy coverage with manual/SDK evidence ledger entries while `subagent_status="not_spawned"`. A spawned subagent without evidence ledger entries does not satisfy coverage by itself.
+App subagents are optional workers, not the coverage mechanism. A run can satisfy coverage with manual/SDK evidence ledger entries while `subagent_status="not_spawned"`. A spawned subagent without evidence ledger entries does not satisfy coverage by itself. `app_handoff` does not imply `programmaticMultiAgent=true`; manual backfill updates `evidence_mode`, not `runner_mode`.
+
+`strict_programmatic` currently requires SDK threads or another deterministic worker runner. If no required buckets are produced, the SDK runner is unavailable, or zero workers start, the run status is `failed`.
 
 ## A/B Workflow
 
@@ -43,4 +50,4 @@ Compare:
 - actual subagent or SDK-thread usage
 - evidence gate result
 
-If a baseline is supplied, compare the baseline source count, source type count, and bucket coverage ratio. If no baseline is supplied, state only that hardflow coverage is broad by configured matrix.
+If a valid baseline is supplied, compare the baseline source count, source type count, bucket coverage ratio, primary source count, and coverage score. Eval also outputs delta metrics. If no baseline is supplied, `baselinePresent=false`, `broaderThanDefaultClaimAllowed=false`, and you should state only that hardflow coverage is broad by configured matrix.

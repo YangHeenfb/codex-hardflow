@@ -149,7 +149,7 @@ describe("research runner reports", () => {
     expect(stopValidationGate({ cwd, turnId: marker.turnId }).decision).toBe("block");
   });
 
-  it("manual backfill adds sources and can satisfy evidence gate for mixed research", async () => {
+  it("manual backfill adds sources and can satisfy evidence gate without changing runner mode", async () => {
     const cwd = tempRepo();
     const prompt = "research current agent framework choices";
     await runResearch(prompt, cwd, {
@@ -182,7 +182,8 @@ describe("research runner reports", () => {
       finding: "Default discovery adds corroborating evidence."
     });
 
-    expect(report.runner_mode).toBe("mixed");
+    expect(report.runner_mode).toBe("sdk_threads");
+    expect(report.evidence_mode).toBe("mixed");
     expect(report.bucket_statuses.official_docs).toBe("manual_backfilled");
     expect(report.searched_sources_table.length).toBe(3);
     expect(stopValidationGate({ cwd, turnId: "turn-manual-backfill" }).decision).toBe("allow");
@@ -218,6 +219,9 @@ describe("research runner reports", () => {
     });
 
     expect(report.runner_mode).toBe("app_handoff");
+    expect(report.evidence_mode).toBe("none");
+    expect(report.programmaticTrigger).toBe(true);
+    expect(report.programmaticMultiAgent).toBe(false);
     expect(report.app_handoff_required).toBe(true);
     expect(report.sdk_threads_started).toBe(false);
     expect(report.sdk_threads_allowed).toBe(false);
@@ -361,6 +365,28 @@ describe("research runner reports", () => {
     expect(report.subagent_skip_reason).toBe("App subagent runtime was disabled in this test.");
   });
 
+  it("app_handoff plus manual add-source keeps runner_mode and sets evidence_mode", async () => {
+    const cwd = tempRepo();
+    const initial = await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-runner-evidence-boundary" }
+    });
+    const report = addManualSourceToReport(cwd, {
+      runId: initial.runId,
+      bucket: "official_docs",
+      title: "Official docs",
+      url_or_ref: "https://example.com/docs",
+      claim: "Official docs reviewed."
+    });
+
+    expect(report.runner_mode).toBe("app_handoff");
+    expect(report.evidence_mode).toBe("manual_backfilled");
+    expect(report.programmaticTrigger).toBe(true);
+    expect(report.programmaticMultiAgent).toBe(false);
+  });
+
   it("subagent report cannot overwrite parent report and only merges through parent flow", async () => {
     const cwd = tempRepo();
     const parent = await runResearch("research current onboarding patterns for product teams", cwd, {
@@ -398,6 +424,7 @@ describe("research runner reports", () => {
     const merged = mergeSubagentReports(cwd, parent.runId);
     expect(merged.searched_sources_table).toHaveLength(1);
     expect(merged.mergedSubagentReports).toContain("official_docs_researcher-official_docs.json");
+    expect(merged.programmaticMultiAgent).toBe(true);
     expect(loadResearchReport(cwd, parent.runId).searched_sources_table).toHaveLength(1);
   });
 
@@ -448,6 +475,61 @@ describe("research runner reports", () => {
     });
 
     expect(assertResearchReportEvidence(report).passed).toBe(false);
+  });
+
+  it("strict_programmatic with empty required buckets fails honestly", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("strict research with no buckets", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: routerOutputForBuckets([], { researchProfile: "none" }),
+      strictProgrammatic: true,
+      sdkAvailable: true,
+      input: { turnId: "turn-strict-empty-buckets" }
+    });
+
+    expect(report.runner_mode).toBe("strict_programmatic");
+    expect(report.evidence_mode).toBe("none");
+    expect(report.status).toBe("failed");
+    expect(report.failure_reason).toBe("strict_programmatic requires non-empty required buckets");
+    expect(report.agent_runs).toHaveLength(0);
+    expect(report.researcher_reports).toHaveLength(0);
+    expect(report.manual_fallback_reason).toBeUndefined();
+  });
+
+  it("strict_programmatic with no matrix workers fails honestly", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("strict research zero workers", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: routerOutputForBuckets([], { researchProfile: "broad" }),
+      strictProgrammatic: true,
+      sdkAvailable: true,
+      input: { turnId: "turn-strict-zero-workers" }
+    });
+
+    expect(report.runner_mode).toBe("strict_programmatic");
+    expect(report.status).toBe("failed");
+    expect(report.failure_reason).toBe("strict_programmatic started zero workers");
+    expect(report.agent_runs).toHaveLength(0);
+    expect(report.researcher_reports).toHaveLength(0);
+    expect(report.programmaticMultiAgent).toBe(false);
+  });
+
+  it("strict_programmatic with worker reports records programmaticMultiAgent", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("strict research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
+      strictProgrammatic: true,
+      sdkAvailable: true,
+      input: { turnId: "turn-strict-workers" },
+      sdkPromptRunner: async (_prompt, _cwd, bucket) => validRunnerJson(bucket)
+    });
+
+    expect(report.runner_mode).toBe("strict_programmatic");
+    expect(report.evidence_mode).toBe("sdk_threads");
+    expect(report.agent_runs.length).toBeGreaterThan(0);
+    expect(report.researcher_reports.length).toBeGreaterThan(0);
+    expect(report.programmaticMultiAgent).toBe(true);
   });
 
   it("starts SDK threads only when sdk_threads or executeSdkResearch is explicit", async () => {

@@ -1,17 +1,24 @@
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { maybeLoadCoveragePlan, type CoveragePlan } from "./coverage/coveragePlan.js";
 import { hasEvidenceForRequiredBuckets, isNoSignalEvidence, loadEvidenceLedger, type EvidenceItem } from "./coverage/evidenceLedger.js";
+import { researchRunEvidenceLedgerPath, researchRunReportPath, researchRunsDir } from "./paths.js";
 import { assertResearchReportEvidence, loadResearchReport } from "./researchOrchestrator.js";
 import type { ResearchReport, ResearchSource } from "./schemas.js";
 
 export interface CoverageEvalOptions {
-  runId: string;
+  runId?: string;
   baselineRunId?: string;
+  latestEvidenceRun?: boolean;
+  includeTestRuns?: boolean;
 }
 
 export interface CoverageEvalResult {
   runId: string;
+  selectedRunId: string;
+  selectedRunReason: string;
   requiredBucketCount: number;
   completedBucketCount: number;
+  completedOrBackfilledBucketCount: number;
   bucketCoverageRatio: number;
   questionCoverageRatio: number;
   perspectiveCoverageRatio: number;
@@ -30,15 +37,25 @@ export interface CoverageEvalResult {
   noSignalRecords: number;
   subagentSpawnedCount: number;
   manualBackfillCount: number;
+  programmaticTrigger: boolean;
+  programmaticMultiAgent: boolean;
   evidenceGatePassed: boolean;
   criticalBucketsCovered: boolean;
   noSignalRecorded: boolean;
   coverage_score: number;
   coverage_claim: string;
+  baselinePresent: boolean;
+  broaderThanDefaultClaimAllowed: boolean;
   baselineRunId?: string;
   baselineSourceCount?: number;
   baselineSourceTypeCount?: number;
   baselineBucketCoverageRatio?: number;
+  baselineCoverageScore?: number;
+  deltaBucketCoverageRatio?: number;
+  deltaUniqueSourceTypeCount?: number;
+  deltaPrimarySourceCount?: number;
+  deltaCoverageScore?: number;
+  deltaSourceCount?: number;
 }
 
 function uniqueSourceKey(source: ResearchSource): string {
@@ -61,7 +78,26 @@ function completedStatus(status: string | undefined): boolean {
   return status === "completed" || status === "manual_backfilled" || status === "searched_but_no_signal";
 }
 
-type CoverageMetrics = Omit<CoverageEvalResult, "coverage_score" | "coverage_claim" | "runId">;
+type CoverageMetrics = Omit<
+  CoverageEvalResult,
+  | "coverage_score"
+  | "coverage_claim"
+  | "runId"
+  | "selectedRunId"
+  | "selectedRunReason"
+  | "baselinePresent"
+  | "broaderThanDefaultClaimAllowed"
+  | "baselineRunId"
+  | "baselineSourceCount"
+  | "baselineSourceTypeCount"
+  | "baselineBucketCoverageRatio"
+  | "baselineCoverageScore"
+  | "deltaBucketCoverageRatio"
+  | "deltaUniqueSourceTypeCount"
+  | "deltaPrimarySourceCount"
+  | "deltaCoverageScore"
+  | "deltaSourceCount"
+>;
 
 function baseMetrics(report: ResearchReport): CoverageMetrics {
   const requiredBuckets = report.required_buckets.length > 0 ? report.required_buckets : report.source_matrix.requiredBuckets;
@@ -77,6 +113,7 @@ function baseMetrics(report: ResearchReport): CoverageMetrics {
   return {
     requiredBucketCount: requiredBuckets.length,
     completedBucketCount,
+    completedOrBackfilledBucketCount: completedBucketCount,
     bucketCoverageRatio: requiredBuckets.length === 0 ? 0 : completedBucketCount / requiredBuckets.length,
     questionCoverageRatio: 0,
     perspectiveCoverageRatio: 0,
@@ -95,6 +132,8 @@ function baseMetrics(report: ResearchReport): CoverageMetrics {
     noSignalRecords: report.searched_but_no_signal?.length ?? 0,
     subagentSpawnedCount: report.subagent_status === "spawned" ? report.agent_runs.filter((run) => !run.fallback_used).length : 0,
     manualBackfillCount: report.agent_runs.filter((run) => run.fallback_used || run.status === "manual_fallback").length,
+    programmaticTrigger: report.programmaticTrigger === true,
+    programmaticMultiAgent: report.programmaticMultiAgent === true,
     evidenceGatePassed: evidence.passed,
     criticalBucketsCovered,
     noSignalRecorded
@@ -145,6 +184,7 @@ function planLedgerMetrics(plan: CoveragePlan, items: EvidenceItem[], report?: R
   return {
     requiredBucketCount: requiredBuckets.length,
     completedBucketCount,
+    completedOrBackfilledBucketCount: completedBucketCount,
     bucketCoverageRatio: requiredBuckets.length === 0 ? 0 : completedBucketCount / requiredBuckets.length,
     questionCoverageRatio: requiredQuestions.length === 0 ? 0 : coveredQuestions.length / requiredQuestions.length,
     perspectiveCoverageRatio: requiredPerspectives.length === 0 ? 0 : coveredPerspectives.length / requiredPerspectives.length,
@@ -165,6 +205,8 @@ function planLedgerMetrics(plan: CoveragePlan, items: EvidenceItem[], report?: R
     noSignalRecords,
     subagentSpawnedCount: report?.subagent_status === "spawned" ? report.agent_runs.filter((run) => !run.fallback_used).length : 0,
     manualBackfillCount: countEvidence(items, (item) => item.engine === "manual_backfill"),
+    programmaticTrigger: report?.programmaticTrigger === true,
+    programmaticMultiAgent: report?.programmaticMultiAgent === true,
     evidenceGatePassed: coverage.passed,
     criticalBucketsCovered,
     noSignalRecorded: noSignalRecords > 0
@@ -186,6 +228,75 @@ function score(metrics: CoverageMetrics): number {
   return Math.round(Math.min(100, raw));
 }
 
+const TEST_RUN_PATTERNS = ["plumbing", "flag-test", "hook-audit", "injection-check", "subagent-audit", "coverage-audit", "router-only", "dry-run", "test"];
+
+function excludedTestRun(runId: string): boolean {
+  const lowered = runId.toLowerCase();
+  return TEST_RUN_PATTERNS.some((pattern) => lowered.includes(pattern));
+}
+
+function readRunReport(cwd: string, runId: string): ResearchReport | undefined {
+  const target = researchRunReportPath(cwd, runId);
+  if (!existsSync(target)) return undefined;
+  try {
+    return JSON.parse(readFileSync(target, "utf8")) as ResearchReport;
+  } catch {
+    return undefined;
+  }
+}
+
+function ledgerItemCount(cwd: string, runId: string): { count: number; updatedAt?: string } {
+  const target = researchRunEvidenceLedgerPath(cwd, runId);
+  if (!existsSync(target)) return { count: 0 };
+  try {
+    const parsed = JSON.parse(readFileSync(target, "utf8")) as { updatedAt?: string; items?: unknown[] };
+    return { count: Array.isArray(parsed.items) ? parsed.items.length : 0, updatedAt: parsed.updatedAt };
+  } catch {
+    return { count: 0 };
+  }
+}
+
+function sortableTime(report: ResearchReport, ledgerUpdatedAt?: string): number {
+  const times = [report.generatedAt, report.currentPointerUpdatedAt, ledgerUpdatedAt]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value));
+  return times.length > 0 ? Math.max(...times) : 0;
+}
+
+interface RunSelection {
+  runId: string;
+  reason: string;
+}
+
+export function selectCoverageRun(cwd: string, options: Pick<CoverageEvalOptions, "includeTestRuns"> = {}): RunSelection {
+  const runsDir = researchRunsDir(cwd);
+  if (!existsSync(runsDir)) throw new Error("No evidence-bearing parent research run found; pass --run-id.");
+  const candidates: Array<{ runId: string; report: ResearchReport; ledgerCount: number; time: number }> = [];
+  for (const dirent of readdirSync(runsDir, { withFileTypes: true })) {
+    if (!dirent.isDirectory()) continue;
+    const runId = dirent.name;
+    if (!options.includeTestRuns && excludedTestRun(runId)) continue;
+    const report = readRunReport(cwd, runId);
+    if (!report) continue;
+    if (report.owner && report.owner !== "parent") continue;
+    if (report.status !== "completed" && report.status !== "degraded") continue;
+    const plan = maybeLoadCoveragePlan(cwd, runId);
+    if (!report.source_matrix && !plan) continue;
+    const ledger = ledgerItemCount(cwd, runId);
+    const sourceCount = Array.isArray(report.searched_sources_table) ? report.searched_sources_table.length : 0;
+    if (sourceCount === 0 && ledger.count === 0) continue;
+    candidates.push({ runId, report, ledgerCount: ledger.count, time: sortableTime(report, ledger.updatedAt) });
+  }
+  candidates.sort((a, b) => b.time - a.time || b.ledgerCount - a.ledgerCount || b.runId.localeCompare(a.runId));
+  const selected = candidates[0];
+  if (!selected) throw new Error("No evidence-bearing parent research run found; pass --run-id.");
+  return {
+    runId: selected.runId,
+    reason: `selected latest evidence-bearing parent run (${selected.report.searched_sources_table?.length ?? 0} report sources, ${selected.ledgerCount} ledger items)`
+  };
+}
+
 function metricsForRun(cwd: string, runId: string): { runId: string; metrics: CoverageMetrics } {
   const plan = maybeLoadCoveragePlan(cwd, runId);
   if (plan) {
@@ -203,21 +314,38 @@ function metricsForRun(cwd: string, runId: string): { runId: string; metrics: Co
 }
 
 export function evaluateCoverage(cwd: string, options: CoverageEvalOptions): CoverageEvalResult {
-  const { runId, metrics } = metricsForRun(cwd, options.runId);
+  const selection = options.runId
+    ? { runId: options.runId, reason: "explicit --run-id" }
+    : selectCoverageRun(cwd, { includeTestRuns: options.includeTestRuns });
+  const { runId, metrics } = metricsForRun(cwd, selection.runId);
+  const coverageScore = score(metrics);
   const result: CoverageEvalResult = {
     runId,
+    selectedRunId: runId,
+    selectedRunReason: selection.reason,
     ...metrics,
-    coverage_score: score(metrics),
-    coverage_claim: "hardflow coverage is broad by configured matrix"
+    coverage_score: coverageScore,
+    coverage_claim: "hardflow coverage is broad by configured matrix",
+    baselinePresent: false,
+    broaderThanDefaultClaimAllowed: false
   };
   if (options.baselineRunId) {
     const baseline = metricsForRun(cwd, options.baselineRunId).metrics;
+    const baselineCoverageScore = score(baseline);
     result.baselineRunId = options.baselineRunId;
     result.baselineSourceCount = baseline.uniqueSourceCount;
     result.baselineSourceTypeCount = baseline.uniqueSourceTypeCount;
     result.baselineBucketCoverageRatio = baseline.bucketCoverageRatio;
+    result.baselineCoverageScore = baselineCoverageScore;
+    result.baselinePresent = baseline.uniqueSourceCount > 0 || baseline.completedBucketCount > 0;
+    result.broaderThanDefaultClaimAllowed = result.baselinePresent;
+    result.deltaBucketCoverageRatio = result.bucketCoverageRatio - baseline.bucketCoverageRatio;
+    result.deltaUniqueSourceTypeCount = result.uniqueSourceTypeCount - baseline.uniqueSourceTypeCount;
+    result.deltaPrimarySourceCount = result.primarySourceCount - baseline.primarySourceCount;
+    result.deltaCoverageScore = result.coverage_score - baselineCoverageScore;
+    result.deltaSourceCount = result.uniqueSourceCount - baseline.uniqueSourceCount;
     result.coverage_claim =
-      result.uniqueSourceCount > baseline.uniqueSourceCount && result.uniqueSourceTypeCount >= baseline.uniqueSourceTypeCount
+      result.broaderThanDefaultClaimAllowed && result.uniqueSourceCount > baseline.uniqueSourceCount && result.uniqueSourceTypeCount >= baseline.uniqueSourceTypeCount
         ? "hardflow coverage exceeded the supplied baseline on source count and matched or exceeded source type diversity"
         : "hardflow coverage was evaluated against the supplied baseline";
   }

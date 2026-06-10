@@ -302,6 +302,50 @@ export const SEARCH_ENGINE_REGISTRY: SearchEngineManifest[] = [
     riskLevel: "medium"
   },
   {
+    name: "competitor_official_docs",
+    bucket: "competitors",
+    description: "Search product/vendor docs and official product pages for comparable systems.",
+    available: true,
+    deterministic: false,
+    requiresNetwork: true,
+    expectedOutputSchema: SOURCE_SCHEMA,
+    defaultLimit: 5,
+    riskLevel: "medium"
+  },
+  {
+    name: "competitor_github",
+    bucket: "competitors",
+    description: "Search GitHub repos and open-source project pages for comparable systems.",
+    available: true,
+    deterministic: false,
+    requiresNetwork: true,
+    expectedOutputSchema: SOURCE_SCHEMA,
+    defaultLimit: 5,
+    riskLevel: "medium"
+  },
+  {
+    name: "competitor_engineering_blogs",
+    bucket: "competitors",
+    description: "Search engineering blogs, launch posts, changelogs, and product architecture posts.",
+    available: true,
+    deterministic: false,
+    requiresNetwork: true,
+    expectedOutputSchema: SOURCE_SCHEMA,
+    defaultLimit: 5,
+    riskLevel: "medium"
+  },
+  {
+    name: "competitor_product_docs",
+    bucket: "competitors",
+    description: "Search product documentation for commercial coding-agent and multi-agent systems.",
+    available: true,
+    deterministic: false,
+    requiresNetwork: true,
+    expectedOutputSchema: SOURCE_SCHEMA,
+    defaultLimit: 5,
+    riskLevel: "medium"
+  },
+  {
     name: "default_web_search",
     bucket: "codex_default_discovery",
     description: "Run default web discovery without bucket-specific constraints.",

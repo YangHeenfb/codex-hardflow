@@ -48,12 +48,15 @@ export interface BuildResearchReportOptions {
   routerTraceReuseReason?: string;
   routerTraceStaleReason?: string;
   runnerMode?: ResearchRunnerMode;
+  evidenceMode?: ResearchReport["evidence_mode"];
   manualFallbackReason?: string;
+  failureReason?: string;
   subagentStatus?: ResearchReport["subagent_status"];
   subagentTriggerSource?: ResearchReport["subagent_trigger_source"];
   subagentSkipReason?: string;
   triggerSource?: TriggerSource;
   programmaticTrigger?: boolean;
+  programmaticMultiAgent?: boolean;
   strictProgrammatic?: boolean;
   appHandoffRequired?: boolean;
   sdkThreadsStarted?: boolean;
@@ -268,23 +271,35 @@ function reportStatusForRunner(runnerMode: ResearchRunnerMode, bucketStatuses: R
 
 function manualBackfillRequiredFor(runnerMode: ResearchRunnerMode, status: ResearchReport["status"], searchedSources: ResearchSource[]): boolean {
   if (runnerMode === "app_handoff" || runnerMode === "manual_fallback") return true;
-  if (runnerMode === "sdk_threads") return status !== "completed" || searchedSources.length === 0;
+  if (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic") return status !== "completed" || searchedSources.length === 0;
   return false;
 }
 
 function defaultSubagentStatus(runnerMode: ResearchRunnerMode, options: BuildResearchReportOptions): SubagentStatus {
   if (options.subagentStatus) return options.subagentStatus;
-  if (runnerMode === "sdk_threads") return "spawned";
+  if (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic") return "spawned";
   if (runnerMode === "app_handoff") return "not_spawned";
   return "not_applicable";
 }
 
 function defaultSubagentTriggerSource(runnerMode: ResearchRunnerMode, status: SubagentStatus, options: BuildResearchReportOptions): SubagentTriggerSource {
   if (options.subagentTriggerSource) return options.subagentTriggerSource;
-  if (runnerMode === "sdk_threads") return "sdk_threads";
+  if (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic") return "sdk_threads";
   if (status === "spawned") return "app_tool";
   if (runnerMode === "manual_fallback" || runnerMode === "mixed") return "manual";
   return "none";
+}
+
+function defaultEvidenceMode(runnerMode: ResearchRunnerMode, searchedSources: ResearchSource[], agentRuns: ResearchAgentRun[]): ResearchReport["evidence_mode"] {
+  if (searchedSources.length === 0 && agentRuns.length === 0) return "none";
+  if (runnerMode === "app_handoff") return searchedSources.length > 0 ? "app_handoff" : "none";
+  if (runnerMode === "manual_fallback") return searchedSources.length > 0 ? "manual_backfilled" : "none";
+  if (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic") return "sdk_threads";
+  return "mixed";
+}
+
+function hasProgrammaticWorkerRuns(agentRuns: ResearchAgentRun[], mergedSubagentReports: string[] = []): boolean {
+  return agentRuns.some((run) => !run.fallback_used && run.status !== "manual_fallback") || mergedSubagentReports.length > 0;
 }
 
 export function buildResearchReport(
@@ -318,6 +333,9 @@ export function buildResearchReport(
   const runId = options.runId ?? options.turnId ?? `run-${promptHash}-${hashText(generatedAt)}`;
   const subagentStatus = defaultSubagentStatus(runnerMode, options);
   const subagentTriggerSource = defaultSubagentTriggerSource(runnerMode, subagentStatus, options);
+  const mergedSubagentReports = options.mergedSubagentReports ?? [];
+  const evidenceMode = options.evidenceMode ?? defaultEvidenceMode(runnerMode, searchedSources, agentRuns);
+  const programmaticMultiAgent = options.programmaticMultiAgent ?? hasProgrammaticWorkerRuns(agentRuns, mergedSubagentReports);
 
   return {
     runId,
@@ -326,7 +344,7 @@ export function buildResearchReport(
     parentTaskPromptHash: options.parentTaskPromptHash ?? promptHash,
     subagentName: options.subagentName,
     bucket: options.bucket,
-    mergedSubagentReports: options.mergedSubagentReports ?? [],
+    mergedSubagentReports,
     currentPointerUpdatedAt: options.currentPointerUpdatedAt,
     task,
     rawUserPrompt: parts.rawUserPrompt,
@@ -338,8 +356,11 @@ export function buildResearchReport(
     taskType: options.taskType ?? "research-heavy",
     triggerSource: options.triggerSource ?? "unknown",
     programmaticTrigger: options.programmaticTrigger ?? false,
+    programmaticMultiAgent,
     status,
     runner_mode: runnerMode,
+    evidence_mode: evidenceMode,
+    failure_reason: options.failureReason,
     strict_programmatic: options.strictProgrammatic,
     app_handoff_required: options.appHandoffRequired ?? runnerMode === "app_handoff",
     sdk_threads_started: options.sdkThreadsStarted ?? runnerMode === "sdk_threads",
@@ -612,8 +633,11 @@ function writeRunMetadata(cwd: string, report: ResearchReport): void {
         parentTaskPromptHash: report.parentTaskPromptHash,
         triggerSource: report.triggerSource,
         programmaticTrigger: report.programmaticTrigger,
+        programmaticMultiAgent: report.programmaticMultiAgent,
         runner_mode: report.runner_mode,
+        evidence_mode: report.evidence_mode,
         strict_programmatic: report.strict_programmatic,
+        failure_reason: report.failure_reason,
         status: report.status,
         generatedAt: report.generatedAt,
         currentPointerUpdatedAt: report.currentPointerUpdatedAt
@@ -644,7 +668,7 @@ function writeParentResearchReport(cwd: string, report: ResearchReport, updateCu
 export async function runResearch(task: string, cwd: string, options: RunResearchOptions = {}): Promise<ResearchReport> {
   const sourceRoot = options.sourceRoot ?? cwd;
   const parts = taskParts(task, options);
-  const runnerMode: ResearchRunnerMode = options.strictProgrammatic || options.executeSdkResearch ? "sdk_threads" : options.runnerMode ?? "app_handoff";
+  const runnerMode: ResearchRunnerMode = options.strictProgrammatic ? "strict_programmatic" : options.executeSdkResearch ? "sdk_threads" : options.runnerMode ?? "app_handoff";
   if (runnerMode === "mixed") throw new Error("runnerMode=mixed is a report state created after backfill; use app_handoff, manual_fallback, or sdk_threads.");
   const triggerSource = options.triggerSource ?? "cli_command";
   const programmaticTrigger = options.programmaticTrigger ?? true;
@@ -782,6 +806,38 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     strictProgrammatic: options.strictProgrammatic
   };
 
+  const strictRequiredBuckets = coveragePlan.sourceBuckets.filter((bucket) => bucket.required).map((bucket) => bucket.bucket);
+  if (runnerMode === "strict_programmatic" && strictRequiredBuckets.length === 0) {
+    const failureReason = "strict_programmatic requires non-empty required buckets";
+    const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "failed", {
+      ...options,
+      ...reportTraceFields,
+      turnId: marker.turnId,
+      runId: marker.runId,
+      routerOutput,
+      rawUserPrompt: parts.rawUserPrompt,
+      normalizedTask: parts.normalizedTask,
+      runnerMode: "strict_programmatic",
+      evidenceMode: "none",
+      failureReason,
+      manualFallbackReason: failureReason,
+      subagentStatus: "failed",
+      subagentTriggerSource: "sdk_threads",
+      subagentSkipReason: failureReason,
+      sdkThreadsStarted: false,
+      sdkThreadsAllowed: true,
+      appHandoffRequired: false,
+      manualBackfillRequired: false,
+      programmaticMultiAgent: false,
+      bucketStatuses: {},
+      agentRuns: [],
+      researcherReports: []
+    });
+    report.status = "failed";
+    report.source_gaps = [];
+    return writeParentResearchReport(cwd, report, true);
+  }
+
   if (runnerMode === "app_handoff") {
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "not_configured", {
       ...options,
@@ -824,7 +880,8 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
 
   const sdkStatus = codexRunnerStatus();
   const sdkAvailable = options.sdkAvailable ?? (sdkStatus.codexExportAvailable && sdkStatus.threadExportAvailable);
-  if (!sdkAvailable && options.strictProgrammatic) {
+  if (!sdkAvailable && runnerMode === "strict_programmatic") {
+    const failureReason = "sdk_threads runner unavailable";
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "failed", {
       ...options,
       ...reportTraceFields,
@@ -833,15 +890,18 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
       routerOutput,
       rawUserPrompt: parts.rawUserPrompt,
       normalizedTask: parts.normalizedTask,
-      runnerMode: "sdk_threads",
-      manualFallbackReason: "Strict programmatic mode requires SDK threads; SDK runner is unavailable.",
+      runnerMode: "strict_programmatic",
+      evidenceMode: "none",
+      failureReason,
+      manualFallbackReason: failureReason,
       subagentStatus: "failed",
       subagentTriggerSource: "sdk_threads",
-      subagentSkipReason: "Strict programmatic SDK threads were required but unavailable.",
+      subagentSkipReason: failureReason,
       sdkThreadsStarted: false,
       sdkThreadsAllowed: true,
       appHandoffRequired: false,
       manualBackfillRequired: false,
+      programmaticMultiAgent: false,
       bucketStatuses: {},
       agentRuns: [],
       researcherReports: []
@@ -878,6 +938,36 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
   }
   const requiredEntries = matrix.entries.filter((entry) => entry.required);
   const results = await runBucketsWithConcurrency(task, cwd, matrix, requiredEntries, options);
+  if (runnerMode === "strict_programmatic" && results.length === 0) {
+    const failureReason = "strict_programmatic started zero workers";
+    const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "failed", {
+      ...options,
+      ...reportTraceFields,
+      turnId: marker.turnId,
+      runId: marker.runId,
+      routerOutput,
+      rawUserPrompt: parts.rawUserPrompt,
+      normalizedTask: parts.normalizedTask,
+      runnerMode: "strict_programmatic",
+      evidenceMode: "none",
+      failureReason,
+      manualFallbackReason: failureReason,
+      subagentStatus: "failed",
+      subagentTriggerSource: "sdk_threads",
+      subagentSkipReason: failureReason,
+      sdkThreadsStarted: false,
+      sdkThreadsAllowed: true,
+      appHandoffRequired: false,
+      manualBackfillRequired: false,
+      programmaticMultiAgent: false,
+      bucketStatuses: {},
+      agentRuns: [],
+      researcherReports: []
+    });
+    report.status = "failed";
+    report.source_gaps = strictRequiredBuckets;
+    return writeParentResearchReport(cwd, report, true);
+  }
   const agentRuns = results.map((result) => result.run);
   const researcherReports = results.map((result) => result.report);
   const requiredBuckets = requiredEntries.map((entry) => String(entry.bucket));
@@ -891,13 +981,15 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     routerOutput,
     rawUserPrompt: parts.rawUserPrompt,
     normalizedTask: parts.normalizedTask,
-    runnerMode: "sdk_threads",
-    subagentStatus: "spawned",
+    runnerMode,
+    evidenceMode: "sdk_threads",
+    subagentStatus: agentRuns.length > 0 ? "spawned" : "failed",
     subagentTriggerSource: "sdk_threads",
     sdkThreadsStarted: true,
     sdkThreadsAllowed: true,
     appHandoffRequired: false,
     subagentInstructionInjected: false,
+    programmaticMultiAgent: agentRuns.length > 0,
     agentRuns,
     bucketStatuses,
     researcherReports
@@ -1048,7 +1140,8 @@ export function addManualSourceToReport(cwd: string, input: ManualSourceInput): 
     confidence: input.confidence ?? "medium",
     notes: input.notes ?? "Manual source backfilled after runner execution."
   };
-  report.runner_mode = "mixed";
+  report.evidence_mode = report.evidence_mode && report.evidence_mode !== "none" && report.evidence_mode !== "manual_backfilled" ? "mixed" : "manual_backfilled";
+  report.programmaticMultiAgent = hasProgrammaticWorkerRuns(report.agent_runs, report.mergedSubagentReports);
   report.manual_backfill_required = false;
   report.app_handoff_required = false;
   if (report.subagent_status !== "spawned") {
@@ -1072,7 +1165,10 @@ export function addManualSourceToReport(cwd: string, input: ManualSourceInput): 
 export function finalizeManualReport(cwd: string, updates: { runId?: string; usefulFindings?: string[]; conflictingFindings?: string[]; sourceGaps?: string[]; citationsOrRefs?: string[]; confidenceSummary?: string } = {}): ResearchReport {
   const report = loadResearchReport(cwd, updates.runId);
   if (report.owner !== "parent") throw new Error("Only parent research reports can be finalized.");
-  report.runner_mode = report.searched_sources_table.length > 0 ? "mixed" : report.runner_mode;
+  if (report.searched_sources_table.length > 0 && (!report.evidence_mode || report.evidence_mode === "none")) {
+    report.evidence_mode = "manual_backfilled";
+  }
+  report.programmaticMultiAgent = hasProgrammaticWorkerRuns(report.agent_runs, report.mergedSubagentReports);
   report.manual_backfill_required = report.searched_sources_table.length === 0;
   report.app_handoff_required = report.runner_mode === "app_handoff";
   if (updates.usefulFindings) report.useful_findings.push(...updates.usefulFindings);
@@ -1192,7 +1288,9 @@ export function mergeSubagentReports(cwd: string, runId?: string): ResearchRepor
     if (addedSources > 0) report.source_gaps = report.source_gaps.filter((bucket) => bucket !== subagent.bucket);
     if (!report.mergedSubagentReports.includes(file)) report.mergedSubagentReports.push(file);
   }
-  report.runner_mode = report.searched_sources_table.length > 0 ? "mixed" : report.runner_mode;
+  if (report.searched_sources_table.length > 0) {
+    report.evidence_mode = report.evidence_mode && report.evidence_mode !== "none" && report.evidence_mode !== "app_handoff" ? "mixed" : "app_handoff";
+  }
   report.manual_backfill_required = report.searched_sources_table.length === 0;
   report.app_handoff_required = report.runner_mode === "app_handoff";
   if (files.length > 0) {
@@ -1200,6 +1298,7 @@ export function mergeSubagentReports(cwd: string, runId?: string): ResearchRepor
     report.subagent_trigger_source = "app_tool";
     report.subagent_skip_reason = undefined;
   }
+  report.programmaticMultiAgent = hasProgrammaticWorkerRuns(report.agent_runs, report.mergedSubagentReports);
   report.status = reportStatusForRunner(report.runner_mode, report.bucket_statuses, report.searched_sources_table);
   return writeResearchReport(cwd, report);
 }

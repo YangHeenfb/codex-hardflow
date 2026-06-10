@@ -55,7 +55,7 @@ function booleanFlag(flags: ParsedFlags, key: string): boolean {
 }
 
 function validRunnerMode(value: string | undefined): value is ResearchRunnerMode {
-  return value === "app_handoff" || value === "sdk_threads" || value === "manual_fallback" || value === "mixed";
+  return value === "app_handoff" || value === "sdk_threads" || value === "strict_programmatic" || value === "manual_fallback" || value === "mixed";
 }
 
 function routerOwnerFlag(value: string | undefined): RouterTraceOwner {
@@ -284,11 +284,13 @@ async function main(): Promise<void> {
         if (requestedRunner === "mixed") throw new Error("--runner mixed is a report state; use app_handoff, manual_fallback, or sdk_threads.");
         const strictProgrammatic = booleanFlag(parsed.flags, "strict-programmatic");
         const executeSdkResearch = booleanFlag(parsed.flags, "execute-sdk-research") || strictProgrammatic;
-        if (executeSdkResearch && requestedRunner && requestedRunner !== "sdk_threads") {
+        if (executeSdkResearch && requestedRunner && requestedRunner !== "sdk_threads" && requestedRunner !== "strict_programmatic") {
           throw new Error("--execute-sdk-research conflicts with non-sdk --runner.");
         }
-        const runnerMode: ResearchRunnerMode = executeSdkResearch
-          ? "sdk_threads"
+        const runnerMode: ResearchRunnerMode = strictProgrammatic
+          ? "strict_programmatic"
+          : executeSdkResearch
+            ? "sdk_threads"
           : validRunnerMode(requestedRunner)
             ? requestedRunner
             : "app_handoff";
@@ -415,13 +417,15 @@ async function main(): Promise<void> {
         if (subcommand === "coverage") {
           printJson(
             evaluateCoverage(cwd, {
-              runId: stringFlag(parsed.flags, "run-id", true) ?? "",
+              runId: stringFlag(parsed.flags, "run-id"),
+              latestEvidenceRun: booleanFlag(parsed.flags, "latest-evidence-run"),
+              includeTestRuns: booleanFlag(parsed.flags, "include-test-runs"),
               baselineRunId: stringFlag(parsed.flags, "baseline-run-id")
             })
           );
           return;
         }
-        throw new Error("Usage: codex-hardflow eval coverage --run-id <runId> [--baseline-run-id <runId>]");
+        throw new Error("Usage: codex-hardflow eval coverage [--run-id <runId>|--latest-evidence-run] [--include-test-runs] [--baseline-run-id <runId>]");
       }
       case "implement": {
         const task = args.join(" ");
@@ -505,7 +509,7 @@ async function main(): Promise<void> {
             "codex-hardflow report assert-evidence",
             "codex-hardflow hooks status [--run-id <runId>]",
             "codex-hardflow hooks assert-active --run-id <runId>",
-            "codex-hardflow eval coverage --run-id <runId> [--baseline-run-id <runId>]",
+            "codex-hardflow eval coverage [--run-id <runId>|--latest-evidence-run] [--include-test-runs] [--baseline-run-id <runId>]",
             "codex-hardflow implement \"task...\"",
             "codex-hardflow validate",
             "codex-hardflow probe-logprobs",
