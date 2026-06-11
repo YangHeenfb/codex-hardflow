@@ -16,6 +16,16 @@ Use `ai/reports/CODEX_REPORT.md` unless the task explicitly defines another repo
 
 Use `ai/context/CURRENT_STATE.md` as the current task state source of truth.
 
+## Project Context Path
+
+Use `ai/context/PROJECT_CONTEXT.md` for stable project goals, architecture,
+known evidence, non-goals, and user working preferences.
+
+## Review Protocol Path
+
+Use `ai/context/REVIEW_PROTOCOL.md` for ChatGPT review rules, source priority,
+stale-state handling, output shape, and safety review.
+
 ## Non-Goals
 
 List behavior, files, systems, or cleanup work that Codex must not change.
@@ -46,6 +56,16 @@ npm test
 ```
 
 If a command is intentionally skipped, Codex must record why in the final report.
+
+## Verification Result
+
+Record pass/fail/skipped status for each verification command. If verification
+is skipped, include the reason.
+
+## Known Anomalies
+
+List stale state, dirty working tree files, skipped checks, missing artifacts,
+branch naming mismatches, or contradictions between plan/report/current state.
 
 ## Safety Checklist
 
@@ -82,8 +102,13 @@ Codex must update `ai/reports/CODEX_REPORT.md` with:
 - Deviations from plan
 - Issues found
 - Remaining risks
-- Suggested next ChatGPT review question
+- Next ChatGPT question, including source priority, known anomalies, expected output format, and a request for the next Codex prompt
 
 ## Next ChatGPT Question
 
-Ask ChatGPT what it should decide next, for example whether the PR is ready to merge or needs another focused follow-up.
+Include:
+
+- Source priority: use uploaded files, the current PR, `ai/context/CURRENT_STATE.md`, `ai/reports/CODEX_REPORT.md`, and this plan before old chat memory.
+- Known anomalies: stale state, dirty working tree, skipped checks, missing artifacts, or other caveats.
+- Expected output format: plan, review findings, merge decision, or Codex-ready prompt.
+- Next Codex prompt request: ask ChatGPT for the exact next prompt the user should give Codex.

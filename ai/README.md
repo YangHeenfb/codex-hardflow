@@ -29,3 +29,4 @@ This is workflow scaffolding only. It must not change application behavior.
 - Do not commit secrets, tokens, API keys, `.env` contents, raw traces, huge logs, or sensitive personal data.
 - If repo reality contradicts a plan, stop, document the mismatch in `ai/reports/CODEX_REPORT.md`, and wait for a revised plan.
 - Use GitHub as the durable review surface; use `ai/context/CURRENT_STATE.md` as the durable task state.
+- Every next ChatGPT question must name source priority, known anomalies, expected output format, and request the next Codex prompt.

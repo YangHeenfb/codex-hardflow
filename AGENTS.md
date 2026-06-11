@@ -6,6 +6,7 @@
 - Use branches named `agent/YYYY-MM-DD-task-slug`.
 - Prefer draft PRs for complex tasks.
 - Before editing code, read `ai/context/CURRENT_STATE.md` and the active plan in `ai/plans/`.
+- For complex planning/review tasks, also read `ai/context/PROJECT_CONTEXT.md` and `ai/context/REVIEW_PROTOCOL.md`.
 - If the plan contradicts repo reality, stop and update `ai/reports/CODEX_REPORT.md`.
 - Before pushing, update `ai/reports/CODEX_REPORT.md` and `ai/context/CURRENT_STATE.md`.
 - Push only reviewable milestone states.
@@ -32,3 +33,12 @@
 
 - Do not push unless the user explicitly asked to push or open/update a PR.
 - Never force-push, delete branches, reset hard, or clean untracked files without explicit approval.
+
+## Next ChatGPT question policy
+
+Every `Next ChatGPT question` must include:
+
+- Source priority: tell ChatGPT to use uploaded files, the current PR, and current state files instead of old chat memory.
+- Known anomalies: list stale state, dirty working tree, skipped checks, missing artifacts, or other caveats.
+- Expected output format: specify whether ChatGPT should return a plan, review findings, a merge decision, or a Codex-ready prompt.
+- Next Codex prompt request: ask ChatGPT to provide the exact next prompt the user should give Codex.
