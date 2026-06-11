@@ -2,9 +2,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { researchRunCoveragePlanPath } from "../paths.js";
 import type { RouterOutput } from "../router/routerSchema.js";
+import type { BucketPriority, CoverageMode, ExcludedBucket } from "../schemas.js";
+import { expandCoveragePolicy } from "./coveragePolicy.js";
 import { searchEngineNamesForBucket, searchEnginesForBucket } from "./searchEngineRegistry.js";
 
-export type CoveragePriority = "critical" | "normal" | "optional";
+export type CoveragePriority = BucketPriority;
 
 export interface CoveragePlanSourceBucket {
   bucket: string;
@@ -38,11 +40,18 @@ export interface CoveragePlanSearchEngine {
 
 export interface CoveragePlan {
   runId: string;
+  coverageMode?: CoverageMode;
   rawUserPrompt: string;
   normalizedTask: string;
   route: string;
   researchProfile: string;
   sourceBuckets: CoveragePlanSourceBucket[];
+  requiredBuckets: string[];
+  excludedBuckets: ExcludedBucket[];
+  searchedButNoSignalRequired: boolean;
+  requiredBucketCount: number;
+  skippedPossibleBuckets: string[];
+  coverageDebt: string[];
   perspectives: CoveragePerspective[];
   researchQuestions: CoverageResearchQuestion[];
   searchEngines: CoveragePlanSearchEngine[];
@@ -63,6 +72,7 @@ export interface CoveragePlan {
 export interface BuildCoveragePlanOptions {
   runId: string;
   normalizedTask?: string;
+  coverageMode?: CoverageMode;
   perspectives?: CoveragePerspective[];
   researchQuestions?: CoverageResearchQuestion[];
 }
@@ -94,83 +104,6 @@ const DEFAULT_PERSPECTIVES: Record<string, Omit<CoveragePerspective, "id">> = {
     required: false
   }
 };
-
-function uniqueBuckets(routerOutput: RouterOutput): Map<string, CoveragePlanSourceBucket> {
-  const buckets = new Map<string, CoveragePlanSourceBucket>();
-  for (const item of routerOutput.sourceBuckets) {
-    const required = item.status === "required";
-    buckets.set(item.bucket, {
-      bucket: item.bucket,
-      required,
-      reason: item.reason,
-      priority: required ? "normal" : "optional",
-      expectedEngines: searchEngineNamesForBucket(item.bucket)
-    });
-  }
-  return buckets;
-}
-
-function ensureBucket(
-  buckets: Map<string, CoveragePlanSourceBucket>,
-  bucket: string,
-  defaults: Pick<CoveragePlanSourceBucket, "required" | "priority" | "reason">
-): void {
-  const existing = buckets.get(bucket);
-  if (existing) {
-    buckets.set(bucket, {
-      ...existing,
-      required: existing.required || defaults.required,
-      priority: defaults.priority === "critical" ? "critical" : existing.priority,
-      reason: existing.reason || defaults.reason,
-      expectedEngines: existing.expectedEngines.length > 0 ? existing.expectedEngines : searchEngineNamesForBucket(bucket)
-    });
-    return;
-  }
-  buckets.set(bucket, {
-    bucket,
-    required: defaults.required,
-    reason: defaults.reason,
-    priority: defaults.priority,
-    expectedEngines: searchEngineNamesForBucket(bucket)
-  });
-}
-
-function applyProfileDefaults(routerOutput: RouterOutput, buckets: Map<string, CoveragePlanSourceBucket>): void {
-  if (routerOutput.researchProfile === "broad" || routerOutput.researchProfile === "current_state" || routerOutput.researchProfile === "competitor") {
-    ensureBucket(buckets, "codex_default_discovery", {
-      required: true,
-      priority: "critical",
-      reason: "Broad research requires default discovery to catch missed buckets."
-    });
-  }
-  if (routerOutput.researchProfile === "local_repo_plus_external") {
-    ensureBucket(buckets, "local_repo", {
-      required: true,
-      priority: "critical",
-      reason: "local_repo_plus_external requires current repository evidence."
-    });
-    ensureBucket(buckets, "competitors", {
-      required: true,
-      priority: "critical",
-      reason: "local_repo_plus_external requires comparable project or product evidence."
-    });
-    ensureBucket(buckets, "official_docs", {
-      required: false,
-      priority: "normal",
-      reason: "Official documentation can ground external comparisons."
-    });
-    ensureBucket(buckets, "github", {
-      required: false,
-      priority: "normal",
-      reason: "GitHub evidence can ground implementation comparisons."
-    });
-    ensureBucket(buckets, "codex_default_discovery", {
-      required: false,
-      priority: "normal",
-      reason: "Default discovery can catch adjacent projects missed by fixed buckets."
-    });
-  }
-}
 
 function perspectiveIdForBucket(bucket: string): string {
   if (bucket === "local_repo") return "local_context";
@@ -208,6 +141,9 @@ function searchEnginesForBuckets(buckets: CoveragePlanSourceBucket[]): CoverageP
 }
 
 function budgetFor(routerOutput: RouterOutput, bucketCount: number): CoveragePlan["budget"] {
+  if (bucketCount >= 8) {
+    return { breadth: Math.max(8, bucketCount), depth: 2, maxRounds: 2, maxSources: Math.max(24, bucketCount * 3) };
+  }
   if (routerOutput.researchProfile === "light") {
     return { breadth: Math.max(3, bucketCount), depth: 1, maxRounds: 1, maxSources: 8 };
   }
@@ -232,20 +168,33 @@ function gatesFor(routerOutput: RouterOutput): CoveragePlan["gates"] {
 }
 
 export function buildCoveragePlan(routerOutput: RouterOutput, rawUserPrompt: string, options: BuildCoveragePlanOptions): CoveragePlan {
-  const buckets = uniqueBuckets(routerOutput);
-  applyProfileDefaults(routerOutput, buckets);
-  const sourceBuckets = [...buckets.values()];
+  const policy = expandCoveragePolicy(routerOutput, rawUserPrompt, options.coverageMode);
+  const sourceBuckets = policy.buckets.map((bucket) => ({
+    bucket: bucket.bucket,
+    required: bucket.required,
+    reason: bucket.reason,
+    priority: bucket.priority,
+    expectedEngines: searchEngineNamesForBucket(bucket.bucket)
+  }));
+  const requiredBuckets = sourceBuckets.filter((bucket) => bucket.required).map((bucket) => bucket.bucket);
   const perspectives = options.perspectives && options.perspectives.length > 0 ? options.perspectives : defaultPerspectives(sourceBuckets);
   const researchQuestions =
     options.researchQuestions && options.researchQuestions.length > 0 ? options.researchQuestions : defaultResearchQuestions(rawUserPrompt, sourceBuckets);
 
   return {
     runId: options.runId,
+    coverageMode: policy.coverageMode,
     rawUserPrompt,
     normalizedTask: options.normalizedTask ?? rawUserPrompt,
     route: routerOutput.route,
     researchProfile: routerOutput.researchProfile,
     sourceBuckets,
+    requiredBuckets,
+    excludedBuckets: policy.excludedBuckets,
+    searchedButNoSignalRequired: policy.searchedButNoSignalRequired,
+    requiredBucketCount: requiredBuckets.length,
+    skippedPossibleBuckets: policy.skippedPossibleBuckets,
+    coverageDebt: policy.coverageDebt,
     perspectives,
     researchQuestions,
     searchEngines: searchEnginesForBuckets(sourceBuckets),

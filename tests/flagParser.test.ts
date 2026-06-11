@@ -23,8 +23,9 @@ describe("typed CLI flag parser", () => {
   });
 
   it("still consumes string flag values", () => {
-    const parsed = parseFlagArgs(["--runner", "app_handoff", "--run-id=run-a", "task text"]);
+    const parsed = parseFlagArgs(["--runner", "app_handoff", "--coverage-mode", "balanced", "--run-id=run-a", "task text"]);
     expect(parsed.flags.runner).toBe("app_handoff");
+    expect(parsed.flags["coverage-mode"]).toBe("balanced");
     expect(parsed.flags["run-id"]).toBe("run-a");
     expect(parsed.rest).toEqual(["task text"]);
   });

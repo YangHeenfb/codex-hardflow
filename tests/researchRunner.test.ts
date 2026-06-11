@@ -438,27 +438,16 @@ describe("research runner reports", () => {
       input: { turnId: "turn-app-handoff-backfilled" }
     });
 
-    addManualSourceToReport(cwd, {
-      bucket: "official_docs",
-      title: "Official docs",
-      url_or_ref: "https://example.com/docs",
-      claim: "Official documentation was reviewed.",
-      finding: "Official docs provide primary evidence."
-    });
-    addManualSourceToReport(cwd, {
-      bucket: "github",
-      title: "GitHub repo",
-      url_or_ref: "https://github.com/example/repo",
-      claim: "Repository evidence was reviewed.",
-      finding: "GitHub provides implementation evidence."
-    });
-    addManualSourceToReport(cwd, {
-      bucket: "codex_default_discovery",
-      title: "Default discovery",
-      url_or_ref: "https://example.com/default",
-      claim: "Default discovery was reviewed.",
-      finding: "Default discovery adds corroborating evidence."
-    });
+    const report = loadResearchReport(cwd);
+    for (const bucket of report.required_buckets) {
+      addManualSourceToReport(cwd, {
+        bucket,
+        title: `${bucket} source`,
+        url_or_ref: `https://example.com/${bucket}`,
+        claim: `${bucket} evidence was reviewed.`,
+        finding: `${bucket} provides required exhaustive evidence.`
+      });
+    }
 
     expect(stopValidationGate({ cwd, turnId: "turn-app-handoff-backfilled" }).decision).toBe("allow");
   });
@@ -477,12 +466,51 @@ describe("research runner reports", () => {
     expect(assertResearchReportEvidence(report).passed).toBe(false);
   });
 
+  it("exhaustive evidence gate fails when a required bucket is silently skipped", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      input: { turnId: "turn-exhaustive-missing-required" }
+    });
+
+    const backfilled = addManualSourceToReport(cwd, {
+      runId: report.runId,
+      bucket: "official_docs",
+      title: "Official docs",
+      url_or_ref: "https://example.com/docs",
+      claim: "Official documentation reviewed.",
+      finding: "Official docs provide primary evidence."
+    });
+
+    const assertion = assertResearchReportEvidence(backfilled);
+    expect(assertion.passed).toBe(false);
+    expect(assertion.reason).toContain("exhaustive coverage missing required bucket");
+  });
+
+  it("exhaustive evidence gate accepts explicit searched_but_no_signal required buckets", async () => {
+    const cwd = tempRepo();
+    const report = await runResearch("research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "sdk_threads",
+      input: { turnId: "turn-exhaustive-no-signal" },
+      sdkPromptRunner: async (_prompt, _cwd, bucket) => validRunnerJson(bucket)
+    });
+
+    expect(report.searched_but_no_signal).toEqual(expect.arrayContaining(report.required_buckets));
+    expect(report.searched_sources_table).toHaveLength(0);
+    expect(assertResearchReportEvidence(report).passed).toBe(true);
+  });
+
   it("strict_programmatic with empty required buckets fails honestly", async () => {
     const cwd = tempRepo();
     const report = await runResearch("strict research with no buckets", cwd, {
       sourceRoot: process.cwd(),
       routerOutput: routerOutputForBuckets([], { researchProfile: "none" }),
       strictProgrammatic: true,
+      coverageMode: "fast",
       sdkAvailable: true,
       input: { turnId: "turn-strict-empty-buckets" }
     });
@@ -496,22 +524,48 @@ describe("research runner reports", () => {
     expect(report.manual_fallback_reason).toBeUndefined();
   });
 
-  it("strict_programmatic with no matrix workers fails honestly", async () => {
+  it("strict_programmatic exhaustive fills empty broad router buckets and starts workers", async () => {
     const cwd = tempRepo();
     const report = await runResearch("strict research zero workers", cwd, {
       sourceRoot: process.cwd(),
       routerOutput: routerOutputForBuckets([], { researchProfile: "broad" }),
       strictProgrammatic: true,
       sdkAvailable: true,
-      input: { turnId: "turn-strict-zero-workers" }
+      input: { turnId: "turn-strict-zero-workers" },
+      sdkPromptRunner: async (_prompt, _cwd, bucket) => validRunnerJson(bucket)
     });
 
     expect(report.runner_mode).toBe("strict_programmatic");
-    expect(report.status).toBe("failed");
-    expect(report.failure_reason).toBe("strict_programmatic started zero workers");
-    expect(report.agent_runs).toHaveLength(0);
-    expect(report.researcher_reports).toHaveLength(0);
-    expect(report.programmaticMultiAgent).toBe(false);
+    expect(report.coverageMode).toBe("exhaustive");
+    expect(report.required_buckets).toEqual(expect.arrayContaining(["official_docs", "github", "community", "academic", "package_registry", "security", "blogs_engineering", "codex_default_discovery"]));
+    expect(report.status).toBe("completed");
+    expect(report.programmaticMultiAgent).toBe(true);
+  });
+
+  it("strict_programmatic exhaustive defaults to all required bucket parallelism", async () => {
+    const cwd = tempRepo();
+    let activeSteps = 0;
+    let maxActiveSteps = 0;
+    const report = await runResearch("strict research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: broadResearchRouterOutput,
+      strictProgrammatic: true,
+      sdkAvailable: true,
+      input: { turnId: "turn-strict-all-required-parallel" },
+      sdkStepRunner: async ({ step, bucket, onThreadId }) => {
+        onThreadId(`thread-${bucket}`);
+        activeSteps += 1;
+        maxActiveSteps = Math.max(maxActiveSteps, activeSteps);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeSteps -= 1;
+        if (step === "partial_evidence") return JSON.stringify({ bucket, queries_run: [`${bucket} query`], sources_found: [], searched_but_no_signal: true });
+        return JSON.stringify({ bucket, queries_run: [`${bucket} query`], sources_found: [], searched_but_no_signal: true, need_more_work: false });
+      }
+    });
+
+    expect(report.coverageMode).toBe("exhaustive");
+    expect(report.required_buckets.length).toBeGreaterThan(3);
+    expect(maxActiveSteps).toBe(report.required_buckets.length);
   });
 
   it("strict_programmatic with worker reports records programmaticMultiAgent", async () => {

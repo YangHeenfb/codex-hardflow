@@ -27,6 +27,7 @@ function jsonOutput<T>(result: { status: number | null; stdout: string; stderr: 
 
 interface CliResearchReport {
   runId: string;
+  required_buckets: string[];
   searched_sources_table: unknown[];
   useful_findings: string[];
   status: string;
@@ -157,13 +158,16 @@ describe("report CLI", () => {
   it("report finalize-manual recomputes status and report assert-evidence passes", () => {
     const cwd = tempRepo();
     const prompt = "research current onboarding patterns for product teams";
-    jsonOutput(runCli(cwd, ["research", "--runner", "app_handoff", "--raw-user-prompt", prompt, prompt]));
+    const initialized = jsonOutput<CliResearchReport>(runCli(cwd, ["research", "--runner", "app_handoff", "--raw-user-prompt", prompt, prompt]));
 
-    for (const bucket of ["official_docs", "github", "community", "codex_default_discovery"]) {
+    const backfilledBuckets = ["official_docs", "github", "community", "academic", "package_registry", "security", "blogs_engineering", "codex_default_discovery"];
+    for (const bucket of backfilledBuckets) {
       jsonOutput(
         runCli(cwd, [
           "report",
           "add-source",
+          "--run-id",
+          initialized.runId,
           "--bucket",
           bucket,
           "--title",
@@ -181,14 +185,14 @@ describe("report CLI", () => {
     const finalized = jsonOutput<{ status: string; confidence_summary: string }>(
       runCli(
         cwd,
-        ["report", "finalize-manual"],
+        ["report", "finalize-manual", "--run-id", initialized.runId],
         JSON.stringify({
           confidenceSummary: "Manual App handoff sources cover the required critical buckets.",
           sourceGaps: []
         })
       )
     );
-    const assertion = jsonOutput<{ passed: boolean }>(runCli(cwd, ["report", "assert-evidence"]));
+    const assertion = jsonOutput<{ passed: boolean }>(runCli(cwd, ["report", "assert-evidence", "--run-id", initialized.runId]));
 
     expect(finalized.status).toBe("completed");
     expect(finalized.confidence_summary).toContain("Manual App handoff");

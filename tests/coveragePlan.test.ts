@@ -9,6 +9,8 @@ import { evaluateCoverage, selectCoverageRun } from "../src/coverageEval.js";
 import { researchRunCoveragePlanPath, researchRunEvidenceLedgerPath } from "../src/paths.js";
 import { addManualSourceToReport, addSubagentReport, mergeSubagentReports, runResearch } from "../src/researchOrchestrator.js";
 import { broadResearchRouterOutput, currentProjectCompetitorRouterOutput } from "./routerFixtures.js";
+import { agentSecurityRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
+import type { RouterOutput } from "../src/router/routerSchema.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-coverage-"));
@@ -28,10 +30,15 @@ describe("CoveragePlan and EvidenceLedger", () => {
     });
 
     expect(plan.runId).toBe("run-plan-broad");
+    expect(plan.coverageMode).toBe("exhaustive");
     expect(plan.route).toBe("research");
     expect(plan.researchProfile).toBe("broad");
     expect(plan.sourceBuckets.map((bucket) => bucket.bucket)).toEqual(expect.arrayContaining(["official_docs", "github", "community", "codex_default_discovery"]));
     expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "codex_default_discovery")?.required).toBe(true);
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "community")).toMatchObject({ required: true, priority: "low" });
+    expect(plan.sourceBuckets.every((bucket) => bucket.required)).toBe(true);
+    expect(plan.requiredBucketCount).toBe(plan.requiredBuckets.length);
+    expect(plan.searchedButNoSignalRequired).toBe(true);
     expect(plan.budget.breadth).toBeGreaterThanOrEqual(5);
     expect(plan.budget.depth).toBeGreaterThanOrEqual(2);
     expect(plan.gates.requireEvidenceLedger).toBe(true);
@@ -51,9 +58,96 @@ describe("CoveragePlan and EvidenceLedger", () => {
       priority: "critical",
       expectedEngines: expect.arrayContaining(["competitor_official_docs", "competitor_github"])
     });
-    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "official_docs")?.priority).toBe("normal");
-    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "github")?.priority).toBe("normal");
-    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "codex_default_discovery")?.priority).toBe("normal");
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "official_docs")).toMatchObject({ required: true, priority: "critical" });
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "github")).toMatchObject({ required: true, priority: "critical" });
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "codex_default_discovery")).toMatchObject({ required: true, priority: "critical" });
+  });
+
+  it("does not assign coverageMode for direct/simple tasks", () => {
+    const plan = buildCoveragePlan(
+      routerOutputForBuckets([], {
+        route: "direct_answer",
+        workflowPattern: "direct",
+        researchProfile: "none",
+        requiresSourceMatrix: false,
+        reasons: ["Direct answer fixture."],
+        risks: []
+      }),
+      "say hello",
+      { runId: "run-direct-no-coverage-mode" }
+    );
+
+    expect(plan.coverageMode).toBeUndefined();
+    expect(plan.sourceBuckets).toEqual([]);
+    expect(plan.requiredBuckets).toEqual([]);
+  });
+
+  it("honors explicit balanced and fast coverage modes with coverage debt for skipped possible buckets", () => {
+    const possibleBuckets = [{ bucket: "github", status: "possible", reason: "GitHub might have adjacent examples." }] as RouterOutput["sourceBuckets"];
+    const routerOutput = routerOutputForBuckets([], {
+      sourceBuckets: possibleBuckets,
+      requiredAgents: []
+    });
+
+    const balanced = buildCoveragePlan(routerOutput, "research current agent framework choices", {
+      runId: "run-balanced-coverage",
+      coverageMode: "balanced"
+    });
+    const fast = buildCoveragePlan(routerOutput, "research current agent framework choices", {
+      runId: "run-fast-coverage",
+      coverageMode: "fast"
+    });
+
+    expect(balanced.coverageMode).toBe("balanced");
+    expect(balanced.sourceBuckets.find((bucket) => bucket.bucket === "github")).toMatchObject({ required: false, priority: "low" });
+    expect(balanced.skippedPossibleBuckets).toContain("github");
+    expect(balanced.coverageDebt.join("\n")).toContain("github");
+    expect(fast.coverageMode).toBe("fast");
+  });
+
+  it("requires exhaustive AI coding agent hidden-validation buckets with engines", () => {
+    const plan = buildCoveragePlan(agentSecurityRouterOutput, "research AI coding agent hidden validation sandbox evaluation approaches", {
+      runId: "run-hidden-validation-exhaustive"
+    });
+
+    expect(plan.coverageMode).toBe("exhaustive");
+    expect(plan.requiredBuckets).toEqual(
+      expect.arrayContaining(["official_docs", "github", "community", "academic", "package_registry", "security", "blogs_engineering", "codex_default_discovery"])
+    );
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "community")).toMatchObject({ required: true, priority: "low" });
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "codex_default_discovery")).toMatchObject({ required: true, priority: "critical" });
+    for (const bucket of plan.sourceBuckets.filter((entry) => entry.required)) {
+      expect(bucket.expectedEngines.length, `${bucket.bucket} expectedEngines`).toBeGreaterThan(0);
+    }
+  });
+
+  it("upgrades possible buckets in exhaustive mode and records excluded buckets with reasons", () => {
+    const routerOutput = routerOutputForBuckets([], {
+      sourceBuckets: [
+        { bucket: "community", status: "possible", reason: "Community reports may contain weak signal." },
+        { bucket: "security", status: "not_needed", reason: "Router fixture says security is logically irrelevant." },
+        { bucket: "private_connectors", status: "possible", reason: "Private context might exist." }
+      ] as RouterOutput["sourceBuckets"],
+      requiredAgents: []
+    });
+
+    const plan = buildCoveragePlan(routerOutput, "research current AI coding agent evaluation approaches", {
+      runId: "run-exhaustive-upgrades-possible"
+    });
+
+    expect(plan.coverageMode).toBe("exhaustive");
+    expect(plan.sourceBuckets.every((bucket) => bucket.required)).toBe(true);
+    expect(plan.sourceBuckets.find((bucket) => bucket.bucket === "community")?.reason).toContain("Upgraded to required");
+    expect(plan.skippedPossibleBuckets).toEqual([]);
+    expect(plan.coverageDebt).toEqual([]);
+    expect(plan.excludedBuckets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ bucket: "security", reason: expect.stringContaining("logically irrelevant") }),
+        expect.objectContaining({ bucket: "private_connectors", reason: expect.stringContaining("explicit") })
+      ])
+    );
+    expect(plan.sourceBuckets.map((bucket) => bucket.bucket)).not.toContain("security");
+    expect(plan.sourceBuckets.map((bucket) => bucket.bucket)).not.toContain("private_connectors");
   });
 
   it("registers competitors engines with required metadata", () => {

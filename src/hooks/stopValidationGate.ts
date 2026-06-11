@@ -158,7 +158,7 @@ function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid
     return !(completed || searchedButNoSignal);
   });
   if (missing.length > 0) {
-    if (appManualEvidenceMode) {
+    if (appManualEvidenceMode && report.coverageMode !== "exhaustive") {
       const criticalMissing = missing.filter((bucket) => bucket === "official_docs" || bucket === "github" || bucket === "codex_default_discovery");
       if (criticalMissing.length === 0) {
         if (!evidence.passed) return { valid: false, reason: evidence.reason };

@@ -14,7 +14,9 @@ codex-hardflow eval coverage --include-test-runs
 
 When no `--run-id` is supplied, eval selects the latest evidence-bearing parent run. It excludes plumbing/test/audit/dry-run/router-only runs by default. Use `--include-test-runs` only when intentionally evaluating test fixtures. If no evidence-bearing parent run exists, pass `--run-id`.
 
-When `.agent/reports/runs/<runId>/coverage_plan.json` and `evidence_ledger.json` exist, eval uses them first. The output includes selected run metadata, bucket coverage, completed/backfilled bucket count, question coverage, perspective coverage, engine diversity, source diversity, primary-source counts, weak community signal counts, GitHub/academic/security/package/local-repo counts, codex_default_discovery presence, searched-but-no-signal records, subagent spawned count, manual backfill count, `programmaticTrigger`, `programmaticMultiAgent`, evidence gate status, and `coverage_score`.
+When `.agent/reports/runs/<runId>/coverage_plan.json` and `evidence_ledger.json` exist, eval uses them first. The output includes selected run metadata, `coverageMode`, required bucket count, completed/backfilled required bucket count, excluded bucket count and reasons, skipped possible buckets, coverage debt, question coverage, perspective coverage, engine diversity, source diversity, primary-source counts, weak community signal counts, GitHub/academic/security/package/local-repo counts, codex_default_discovery presence, searched-but-no-signal records, subagent spawned count, manual backfill count, `programmaticTrigger`, `programmaticMultiAgent`, evidence gate status, and `coverage_score`.
+
+In exhaustive mode, bucket coverage counts required buckets completed by evidence, explicit `searched_but_no_signal`, or a valid exclusion reason. Silently skipped required buckets sharply lower the score and fail the evidence gate. Balanced and fast modes may report skipped possible buckets as coverage debt.
 
 When no CoveragePlan exists, eval falls back to the legacy research report metrics.
 
