@@ -3,7 +3,7 @@ import { maybeLoadCoveragePlan, type CoveragePlan } from "./coverage/coveragePla
 import { hasEvidenceForRequiredBuckets, isNoSignalEvidence, loadEvidenceLedger, type EvidenceItem } from "./coverage/evidenceLedger.js";
 import { researchRunEvidenceLedgerPath, researchRunReportPath, researchRunsDir } from "./paths.js";
 import { assertResearchReportEvidence, loadResearchReport } from "./researchOrchestrator.js";
-import type { ResearchReport, ResearchSource } from "./schemas.js";
+import type { CoverageMode, ExcludedBucket, ResearchReport, ResearchSource } from "./schemas.js";
 
 export interface CoverageEvalOptions {
   runId?: string;
@@ -16,9 +16,11 @@ export interface CoverageEvalResult {
   runId: string;
   selectedRunId: string;
   selectedRunReason: string;
+  coverageMode?: CoverageMode;
   requiredBucketCount: number;
   completedBucketCount: number;
   completedOrBackfilledBucketCount: number;
+  completedRequiredBucketCount: number;
   bucketCoverageRatio: number;
   questionCoverageRatio: number;
   perspectiveCoverageRatio: number;
@@ -34,6 +36,10 @@ export interface CoverageEvalResult {
   localRepoSourceCount: number;
   codexDefaultDiscoveryPresent: boolean;
   searchedButNoSignalCount: number;
+  excludedBucketCount: number;
+  excludedBuckets: ExcludedBucket[];
+  skippedPossibleBuckets: string[];
+  coverageDebt: string[];
   noSignalRecords: number;
   subagentSpawnedCount: number;
   manualBackfillCount: number;
@@ -111,9 +117,11 @@ function baseMetrics(report: ResearchReport): CoverageMetrics {
   const noSignalRecorded = (report.searched_but_no_signal ?? []).length > 0 || Object.values(report.bucket_statuses).includes("searched_but_no_signal");
 
   return {
+    coverageMode: report.coverageMode ?? report.source_matrix.coverageMode,
     requiredBucketCount: requiredBuckets.length,
     completedBucketCount,
     completedOrBackfilledBucketCount: completedBucketCount,
+    completedRequiredBucketCount: completedBucketCount,
     bucketCoverageRatio: requiredBuckets.length === 0 ? 0 : completedBucketCount / requiredBuckets.length,
     questionCoverageRatio: 0,
     perspectiveCoverageRatio: 0,
@@ -129,6 +137,10 @@ function baseMetrics(report: ResearchReport): CoverageMetrics {
     localRepoSourceCount: countSources(sources, (source) => sourceBucket(source) === "local_repo" || sourceType(source).includes("local")),
     codexDefaultDiscoveryPresent: requiredBuckets.includes("codex_default_discovery") && completedStatus(report.bucket_statuses.codex_default_discovery),
     searchedButNoSignalCount: report.searched_but_no_signal?.length ?? 0,
+    excludedBucketCount: report.excludedBucketCount ?? report.excludedBuckets?.length ?? report.source_matrix.excludedBuckets?.length ?? 0,
+    excludedBuckets: report.excludedBuckets ?? report.source_matrix.excludedBuckets ?? [],
+    skippedPossibleBuckets: report.skippedPossibleBuckets ?? report.source_matrix.skippedPossibleBuckets ?? [],
+    coverageDebt: report.coverageDebt ?? report.source_matrix.coverageDebt ?? [],
     noSignalRecords: report.searched_but_no_signal?.length ?? 0,
     subagentSpawnedCount: report.subagent_status === "spawned" ? report.agent_runs.filter((run) => !run.fallback_used).length : 0,
     manualBackfillCount: report.agent_runs.filter((run) => run.fallback_used || run.status === "manual_fallback").length,
@@ -173,7 +185,8 @@ function planLedgerMetrics(plan: CoveragePlan, items: EvidenceItem[], report?: R
   const uniqueSources = new Set(sourceItems.map(evidenceSourceKey));
   const sourceTypes = new Set(sourceItems.map((item) => item.sourceType));
   const engines = new Set(items.map((item) => item.engine));
-  const requiredQuestions = plan.researchQuestions.filter((question) => question.priority !== "optional");
+  const requiredBucketSet = new Set(requiredBuckets);
+  const requiredQuestions = plan.researchQuestions.filter((question) => requiredBucketSet.has(question.bucket));
   const requiredPerspectives = plan.perspectives.filter((perspective) => perspective.required);
   const coveredQuestions = requiredQuestions.filter((question) => questionCovered(question, items));
   const coveredPerspectives = requiredPerspectives.filter((perspective) => perspectiveCovered(perspective, plan, items));
@@ -182,9 +195,11 @@ function planLedgerMetrics(plan: CoveragePlan, items: EvidenceItem[], report?: R
   const criticalBucketsCovered = criticalBuckets.every((bucket) => items.some((item) => item.bucket === bucket));
 
   return {
+    coverageMode: plan.coverageMode,
     requiredBucketCount: requiredBuckets.length,
     completedBucketCount,
     completedOrBackfilledBucketCount: completedBucketCount,
+    completedRequiredBucketCount: completedBucketCount,
     bucketCoverageRatio: requiredBuckets.length === 0 ? 0 : completedBucketCount / requiredBuckets.length,
     questionCoverageRatio: requiredQuestions.length === 0 ? 0 : coveredQuestions.length / requiredQuestions.length,
     perspectiveCoverageRatio: requiredPerspectives.length === 0 ? 0 : coveredPerspectives.length / requiredPerspectives.length,
@@ -202,6 +217,10 @@ function planLedgerMetrics(plan: CoveragePlan, items: EvidenceItem[], report?: R
     localRepoSourceCount: countEvidence(sourceItems, (item) => evidenceBucket(item) === "local_repo" || evidenceSourceType(item).includes("local")),
     codexDefaultDiscoveryPresent: items.some((item) => item.bucket === "codex_default_discovery"),
     searchedButNoSignalCount: noSignalRecords,
+    excludedBucketCount: plan.excludedBuckets?.length ?? 0,
+    excludedBuckets: plan.excludedBuckets ?? [],
+    skippedPossibleBuckets: plan.skippedPossibleBuckets ?? [],
+    coverageDebt: plan.coverageDebt ?? [],
     noSignalRecords,
     subagentSpawnedCount: report?.subagent_status === "spawned" ? report.agent_runs.filter((run) => !run.fallback_used).length : 0,
     manualBackfillCount: countEvidence(items, (item) => item.engine === "manual_backfill"),
@@ -325,7 +344,10 @@ export function evaluateCoverage(cwd: string, options: CoverageEvalOptions): Cov
     selectedRunReason: selection.reason,
     ...metrics,
     coverage_score: coverageScore,
-    coverage_claim: "hardflow coverage is broad by configured matrix",
+    coverage_claim:
+      metrics.coverageMode === "exhaustive" && metrics.bucketCoverageRatio === 1
+        ? "exhaustive hardflow covered all configured required buckets"
+        : "hardflow coverage is broad by configured matrix",
     baselinePresent: false,
     broaderThanDefaultClaimAllowed: false
   };

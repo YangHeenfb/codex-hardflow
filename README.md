@@ -4,10 +4,22 @@ codex-hardflow is a third-party global harness for Codex workflows. It focuses o
 
 It is not an OpenAI official project.
 
+## Research Philosophy
+
+codex-hardflow is coverage-first. For research-heavy work, the goal is to expand the search surface, not to imitate a short default search. In exhaustive mode, any source bucket with a non-trivial chance of useful information is searched, even when the expected signal is weak or costly to collect.
+
+`coverageMode` controls that behavior:
+
+- `exhaustive`: default for research-heavy, `strict_programmatic`, and `app_handoff` research. Optional buckets are not used; applicable buckets are required, searched, explicitly marked `searched_but_no_signal`, or excluded with a reason.
+- `balanced`: keeps possible buckets as coverage debt when skipped.
+- `fast`: minimizes required coverage for explicitly fast runs.
+
+Weak sources such as community discussions can be required in exhaustive mode while still being low priority and low confidence. `codex_default_discovery` is always required in exhaustive research so the run can find missed perspectives.
+
 ## Current Capabilities
 
 - Builds a Source Coverage Matrix for broad research.
-- Writes a run-owned CoveragePlan and EvidenceLedger for coverage-first research.
+- Writes a run-owned exhaustive CoveragePlan and EvidenceLedger for coverage-first research.
 - Always includes `codex_default_researcher` for research-heavy tasks.
 - Requires executor manifests for validation-sensitive implementation.
 - Stores private validator metadata outside the repository.
@@ -36,6 +48,7 @@ codex-hardflow route --owner subagent --parent-run-id <runId> --subagent-name lo
 codex-hardflow research --run-id <runId> --runner app_handoff "compare current React data fetching options"
 codex-hardflow research --run-id <runId> --runner app_handoff --run-router "compare current React data fetching options"
 codex-hardflow research --run-id <runId> --strict-programmatic "compare current React data fetching options"
+codex-hardflow research --run-id <runId> --coverage-mode balanced --runner app_handoff "compare current React data fetching options"
 codex-hardflow report add-source --run-id <runId> --bucket official_docs --title "Docs" --url "https://example.com" --claim "Primary source reviewed"
 codex-hardflow report add-subagent-report --run-id <runId> --agent official_docs_researcher --bucket official_docs --status completed
 codex-hardflow report merge-subagents --run-id <runId>
@@ -51,13 +64,13 @@ codex-hardflow parallel modules.yaml
 codex-hardflow verify
 ```
 
-Task routing is handled by the structured LLM Router and recorded in `.agent/reports/runs/<runId>/router_trace.json`. Parent router traces update `.agent/reports/current/router_trace.json`; subagent router traces are isolated under `.agent/reports/runs/<runId>/subagents/*.router_trace.json` and must not overwrite current. `research --run-id <runId>` reuses an existing parent router trace for the same runId by default; `--run-router` explicitly reruns and replaces it. `--strict-programmatic` currently requires SDK threads or another deterministic worker runner; if none is available, or if no required buckets/workers are produced, it fails honestly instead of falling back to App/AGENTS/skill/manual flow. `--write-trace` is a boolean flag and does not consume task text. Deterministic keyword heuristics are only safety/preflight diagnostics, not the primary route source.
+Task routing is handled by the structured LLM Router and recorded in `.agent/reports/runs/<runId>/router_trace.json`. Parent router traces update `.agent/reports/current/router_trace.json`; subagent router traces are isolated under `.agent/reports/runs/<runId>/subagents/*.router_trace.json` and must not overwrite current. `research --run-id <runId>` reuses an existing parent router trace for the same runId by default; `--run-router` explicitly reruns and replaces it. `--strict-programmatic` currently requires SDK threads or another deterministic worker runner; if none is available, or if no required buckets/workers are produced, it fails honestly instead of falling back to App/AGENTS/skill/manual flow. In exhaustive strict research, SDK execution defaults to all required buckets in parallel unless the user sets a lower concurrency. `--write-trace` is a boolean flag and does not consume task text. Deterministic keyword heuristics are only safety/preflight diagnostics, not the primary route source.
 
 AGENTS.md and the codex-hardflow skill are protocol documentation, not enforcement triggers. A run can claim hardflow completion only when a hook/CLI audit trail records `programmaticTrigger=true`.
 
-Use `codex-hardflow research --runner sdk_threads` or `--execute-sdk-research` only when you intentionally want the CLI to launch Codex SDK researcher threads. Interactive Codex App turns should use `app_handoff` and backfill App/manual/subagent findings through the `report` CLI. `app_handoff` is best-effort and does not imply `programmaticMultiAgent=true`; manual source backfill changes `evidence_mode`, not `runner_mode`. Parent reports are run-owned under `.agent/reports/runs/<runId>/research_report.json`; `.agent/reports/current/research_report.json` is only the current parent copy.
+Use `codex-hardflow research --runner sdk_threads` or `--execute-sdk-research` only when you intentionally want the CLI to launch Codex SDK researcher threads. Interactive Codex App turns should use `app_handoff` and backfill App/manual/subagent findings through the `report` CLI. `app_handoff` creates an exhaustive plan but is best-effort execution; every required bucket still needs evidence, an explicit `searched_but_no_signal`, or an exclusion reason. It does not imply `programmaticMultiAgent=true`; manual source backfill changes `evidence_mode`, not `runner_mode`. Parent reports are run-owned under `.agent/reports/runs/<runId>/research_report.json`; `.agent/reports/current/research_report.json` is only the current parent copy.
 
-Coverage scores are measured against the configured hardflow matrix/plan. `eval coverage` can select the latest evidence-bearing parent run by default, but claims that hardflow was broader than default Codex search require a valid `--baseline-run-id`.
+Coverage scores are measured against the configured hardflow matrix/plan. In exhaustive mode, `eval coverage` counts a required bucket as covered only when it has evidence, an explicit no-signal record, or a valid exclusion reason. `eval coverage` can select the latest evidence-bearing parent run by default, but claims that hardflow was broader than default Codex search require a valid `--baseline-run-id`.
 
 ## Global Installation
 

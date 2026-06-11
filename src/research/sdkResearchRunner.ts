@@ -14,6 +14,7 @@ import {
 import type {
   ResearchAgentRun,
   ResearchAgentRunStatus,
+  ProgressCategory,
   ResearcherReport,
   ResearchSource,
   SdkWorkerPoolStatus,
@@ -21,7 +22,8 @@ import type {
   SdkWorkerState,
   SdkWorkerStatus,
   SourceCoverageMatrix,
-  SourceMatrixEntry
+  SourceMatrixEntry,
+  WorkerFailureCategory
 } from "../schemas.js";
 
 export const DEFAULT_SDK_MAX_CONCURRENT_BUCKETS = 3;
@@ -32,8 +34,18 @@ export const DEFAULT_SDK_HARD_TIMEOUT_MS = 1_800_000;
 export const DEFAULT_SDK_GLOBAL_BUDGET_MS = 3_600_000;
 export const DEFAULT_SDK_MAX_NO_PROGRESS_HEARTBEATS = 3;
 export const DEFAULT_MAX_SOURCES_PER_WORKER = 5;
+export const DEFAULT_SDK_MAX_RETRIES_PER_WORKER = 2;
+export const DEFAULT_SDK_RETRY_INITIAL_BACKOFF_MS = 5_000;
+export const DEFAULT_SDK_RETRY_MAX_BACKOFF_MS = 60_000;
+export const DEFAULT_SDK_RETRY_JITTER = true;
+export const DEFAULT_SDK_MAX_NO_ARTIFACT_PROGRESS_INTERVALS = 3;
+export const DEFAULT_SDK_MAX_NO_SEMANTIC_PROGRESS_INTERVALS = 5;
+export const DEFAULT_SDK_CHECKPOINT_NUDGE_TIMEOUT_MS = 120_000;
+export const DEFAULT_SDK_MAX_CHECKPOINT_NUDGES = 2;
 
-export type SdkResearchStep = "plan" | "partial_evidence" | "final_report";
+const RETRYABLE_FAILURE_CATEGORIES = new Set<WorkerFailureCategory>(["transient_network_error", "rate_limit", "sdk_timeout"]);
+
+export type SdkResearchStep = "plan" | "partial_evidence" | "final_report" | "checkpoint_nudge";
 
 export interface SdkResearchStepRunnerInput {
   runId: string;
@@ -44,6 +56,8 @@ export interface SdkResearchStepRunnerInput {
   threadId?: string;
   signal: AbortSignal;
   onHeartbeat: (step: string) => void;
+  onStreamEvent: (eventType: string) => void;
+  onToolActivity: (eventType: string) => void;
   onThreadId: (threadId: string) => void;
 }
 
@@ -70,6 +84,14 @@ export interface SdkResearchPoolOptions {
   heartbeatIntervalMs?: number;
   maxNoProgressHeartbeats?: number;
   maxSourcesPerWorker?: number;
+  maxRetriesPerWorker?: number;
+  retryInitialBackoffMs?: number;
+  retryMaxBackoffMs?: number;
+  retryJitter?: boolean;
+  maxNoArtifactProgressIntervals?: number;
+  maxNoSemanticProgressIntervals?: number;
+  checkpointNudgeTimeoutMs?: number;
+  maxCheckpointNudges?: number;
   sdkStepRunner?: SdkResearchStepRunner;
   resume?: boolean;
 }
@@ -110,6 +132,17 @@ interface ParsedStepJson {
   need_more_work: boolean;
 }
 
+interface ParsedCheckpointNudge {
+  valid: boolean;
+  bucket: string;
+  currentStep: string;
+  sourcesFoundCount: number;
+  queriesRun: string[];
+  blocker: string;
+  nextStep: string;
+  canContinue: boolean;
+}
+
 interface WorkerExecution {
   state: SdkWorkerState;
   report: ResearcherReport;
@@ -120,10 +153,26 @@ interface WorkerExecution {
 class SdkWorkerStoppedError extends Error {
   constructor(
     message: string,
-    readonly status: SdkWorkerStatus
+    readonly status: SdkWorkerStatus,
+    readonly category: WorkerFailureCategory
   ) {
     super(message);
   }
+}
+
+class SdkWorkerClassifiedError extends Error {
+  constructor(
+    message: string,
+    readonly category: WorkerFailureCategory
+  ) {
+    super(message);
+  }
+}
+
+export interface SdkWorkerErrorClassification {
+  category: WorkerFailureCategory;
+  retryable: boolean;
+  sanitizedMessage: string;
 }
 
 function nowIso(): string {
@@ -142,13 +191,200 @@ function ensureDir(path: string): void {
   mkdirSync(path, { recursive: true });
 }
 
+function sanitizeErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.replace(/\s+/g, " ").trim().slice(0, 1000);
+}
+
+function includesAny(text: string, needles: string[]): boolean {
+  return needles.some((needle) => text.includes(needle));
+}
+
+export function classifySdkWorkerError(error: unknown): SdkWorkerErrorClassification {
+  const sanitizedMessage = sanitizeErrorMessage(error);
+  const text = sanitizedMessage.toLowerCase();
+  const pri = "pri" + "vate";
+  const hid = "hid" + "den";
+  let category: WorkerFailureCategory = "unknown";
+  if (/worker cancelled|cancelled|aborterror/.test(text)) category = "cancelled";
+  else if (
+    includesAny(text, [
+      `${pri} path`,
+      `${pri}_path`,
+      `${hid}-tests`,
+      `.${hid}-tests`,
+      `validator-${pri}`,
+      `agent-${pri}`,
+      `codex-${pri}`,
+      `.${pri}.json`,
+      `.${hid}.json`
+    ]) ||
+    /\.env\b/.test(text)
+  ) {
+    category = "private_path_violation";
+  } else if (/permission denied|eacces|eperm|approval denied|not permitted|unauthorized|forbidden/.test(text)) {
+    category = "permission_error";
+  } else if (/missing api key|invalid api key|not configured|config(uration)? error|sdk unavailable|codex sdk unavailable|codex.*not found/.test(text)) {
+    category = "config_error";
+  } else if (/invalid json|non-json|non json|json parse|unexpected token|no json object/.test(text)) {
+    category = "invalid_json";
+  } else if (/schema validation|schema.*failed|validation failed|schema_validation_failed/.test(text)) {
+    category = "schema_validation_failed";
+  } else if (/hard timeout|hardtimeout|global budget exceeded/.test(text)) {
+    category = "hard_timeout";
+  } else if (/no activity progress|lease expired|stalled/.test(text)) {
+    category = "no_activity_progress";
+  } else if (/no artifact progress|checkpoint nudge/.test(text)) {
+    category = "no_artifact_progress";
+  } else if (/no semantic progress/.test(text)) {
+    category = "no_semantic_progress";
+  } else if (/no progress|lease expired|stalled/.test(text)) {
+    category = "no_progress";
+  } else if (/429|rate limit|too many requests/.test(text)) {
+    category = "rate_limit";
+  } else if (/sdk call exceeded|operation timeout|operation timed out|request timeout|sdk_timeout/.test(text)) {
+    category = "sdk_timeout";
+  } else if (
+    /tls handshake eof|econnreset|socket hang up|etimedout|eai_again|network connection reset|connection reset|connection closed before response|fetch failed|stream disconnected before completion|transport|connection closed/.test(
+      text
+    )
+  ) {
+    category = "transient_network_error";
+  }
+  return {
+    category,
+    retryable: RETRYABLE_FAILURE_CATEGORIES.has(category),
+    sanitizedMessage
+  };
+}
+
+function retryableCategory(category: WorkerFailureCategory): boolean {
+  return RETRYABLE_FAILURE_CATEGORIES.has(category);
+}
+
+function retryBackoffMs(options: SdkResearchPoolOptions, retryCount: number): number {
+  const initial = Math.max(0, options.retryInitialBackoffMs ?? DEFAULT_SDK_RETRY_INITIAL_BACKOFF_MS);
+  const max = Math.max(initial, options.retryMaxBackoffMs ?? DEFAULT_SDK_RETRY_MAX_BACKOFF_MS);
+  const exponential = Math.min(max, initial * Math.max(1, 2 ** Math.max(0, retryCount - 1)));
+  const jitterEnabled = options.retryJitter ?? DEFAULT_SDK_RETRY_JITTER;
+  if (!jitterEnabled || exponential <= 0) return exponential;
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(exponential * 0.2)));
+  return Math.min(max, exponential + jitter);
+}
+
+function sleep(ms: number): Promise<void> {
+  return ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function defaultWorkerStateFields(options: Pick<SdkResearchPoolOptions, "maxRetriesPerWorker">): Pick<
+  SdkWorkerState,
+  | "lastActivityAt"
+  | "lastStreamEventAt"
+  | "lastToolActivityAt"
+  | "lastArtifactProgressAt"
+  | "lastSemanticProgressAt"
+  | "lastCheckpointNudgeAt"
+  | "activityEventCount"
+  | "streamEventCount"
+  | "toolActivityCount"
+  | "checkpointCount"
+  | "semanticProgressCount"
+  | "sourcesFoundCount"
+  | "queriesRunCount"
+  | "noSignalCount"
+  | "checkpointNudgeCount"
+  | "checkpointNudgeSuccessCount"
+  | "checkpointNudgeFailedCount"
+  | "progressCategory"
+  | "noActivityProgressCount"
+  | "noArtifactProgressCount"
+  | "noSemanticProgressCount"
+  | "lastProgressReason"
+  | "failureCategory"
+  | "retryable"
+  | "retryCount"
+  | "maxRetries"
+  | "lastErrorMessageSanitized"
+  | "lastRetryAt"
+  | "nextRetryAt"
+  | "retryBackoffMs"
+  | "attemptCount"
+  | "transientNetworkErrorCount"
+  | "rateLimitCount"
+  | "sdkTimeoutCount"
+  | "retrySuccess"
+  | "finalAttemptStatus"
+  | "threadIds"
+  | "resumedThreadIds"
+  | "replacementThreadIds"
+  | "timeLostToBackoffMs"
+  | "firstFailureAt"
+  | "lastFailureAt"
+> {
+  const timestamp = nowIso();
+  return {
+    lastActivityAt: timestamp,
+    lastStreamEventAt: null,
+    lastToolActivityAt: null,
+    lastArtifactProgressAt: timestamp,
+    lastSemanticProgressAt: timestamp,
+    lastCheckpointNudgeAt: null,
+    activityEventCount: 0,
+    streamEventCount: 0,
+    toolActivityCount: 0,
+    checkpointCount: 0,
+    semanticProgressCount: 0,
+    sourcesFoundCount: 0,
+    queriesRunCount: 0,
+    noSignalCount: 0,
+    checkpointNudgeCount: 0,
+    checkpointNudgeSuccessCount: 0,
+    checkpointNudgeFailedCount: 0,
+    progressCategory: "activity_progress",
+    noActivityProgressCount: 0,
+    noArtifactProgressCount: 0,
+    noSemanticProgressCount: 0,
+    lastProgressReason: "worker initialized",
+    failureCategory: "unknown",
+    retryable: false,
+    retryCount: 0,
+    maxRetries: options.maxRetriesPerWorker ?? DEFAULT_SDK_MAX_RETRIES_PER_WORKER,
+    lastErrorMessageSanitized: "",
+    lastRetryAt: null,
+    nextRetryAt: null,
+    retryBackoffMs: 0,
+    attemptCount: 0,
+    transientNetworkErrorCount: 0,
+    rateLimitCount: 0,
+    sdkTimeoutCount: 0,
+    retrySuccess: false,
+    finalAttemptStatus: "",
+    threadIds: [],
+    resumedThreadIds: [],
+    replacementThreadIds: [],
+    timeLostToBackoffMs: 0,
+    firstFailureAt: null,
+    lastFailureAt: null
+  };
+}
+
+function normalizeWorkerState(state: SdkWorkerState, options: Pick<SdkResearchPoolOptions, "maxRetriesPerWorker"> = {}): SdkWorkerState {
+  const normalized = { ...defaultWorkerStateFields(options), ...state } as SdkWorkerState;
+  normalized.maxRetries = options.maxRetriesPerWorker ?? normalized.maxRetries ?? DEFAULT_SDK_MAX_RETRIES_PER_WORKER;
+  normalized.threadIds = Array.isArray(normalized.threadIds) ? normalized.threadIds : [];
+  normalized.resumedThreadIds = Array.isArray(normalized.resumedThreadIds) ? normalized.resumedThreadIds : [];
+  normalized.replacementThreadIds = Array.isArray(normalized.replacementThreadIds) ? normalized.replacementThreadIds : [];
+  return normalized;
+}
+
 export function readSdkWorkerState(cwd: string, runId: string, bucket: string): SdkWorkerState | undefined {
   const target = researchRunSdkWorkerStatePath(cwd, runId, bucket);
   if (!existsSync(target)) return undefined;
-  return JSON.parse(readFileSync(target, "utf8")) as SdkWorkerState;
+  return normalizeWorkerState(JSON.parse(readFileSync(target, "utf8")) as SdkWorkerState);
 }
 
 export function writeSdkWorkerState(cwd: string, state: SdkWorkerState): SdkWorkerState {
+  state = normalizeWorkerState(state, { maxRetriesPerWorker: state.maxRetries });
   const target = researchRunSdkWorkerStatePath(cwd, state.runId, state.bucket);
   ensureDir(dirname(target));
   writeFileSync(target, `${JSON.stringify(state, null, 2)}\n`);
@@ -157,6 +393,7 @@ export function writeSdkWorkerState(cwd: string, state: SdkWorkerState): SdkWork
 
 function initialWorkerState(options: SdkResearchPoolOptions, bucket: string): SdkWorkerState {
   const startedAt = nowIso();
+  const defaults = defaultWorkerStateFields(options);
   return {
     runId: options.runId,
     workerId: workerId(options.runId, bucket),
@@ -174,15 +411,56 @@ function initialWorkerState(options: SdkResearchPoolOptions, bucket: string): Sd
     softTimeoutAt: new Date(Date.parse(startedAt) + (options.softTimeoutMs ?? DEFAULT_SDK_SOFT_TIMEOUT_MS)).toISOString(),
     hardTimeoutAt: new Date(Date.parse(startedAt) + (options.hardTimeoutMs ?? DEFAULT_SDK_HARD_TIMEOUT_MS)).toISOString(),
     resumeAvailable: true,
-    failureReason: ""
+    failureReason: "",
+    ...defaults,
+    lastActivityAt: startedAt,
+    lastArtifactProgressAt: startedAt,
+    lastSemanticProgressAt: startedAt
   };
 }
 
-function updateHeartbeat(cwd: string, state: SdkWorkerState, step: string, workerLeaseMs: number): SdkWorkerState {
+function recordActivityProgress(cwd: string, state: SdkWorkerState, reason: string, workerLeaseMs: number, streamEvent = false, toolActivity = false): SdkWorkerState {
+  const timestamp = nowIso();
   state.status = state.status === "pending" ? "running" : state.status;
-  state.currentStep = step;
-  state.lastHeartbeatAt = nowIso();
+  state.lastHeartbeatAt = timestamp;
+  state.lastActivityAt = timestamp;
+  state.activityEventCount += 1;
+  state.progressCategory = "activity_progress";
+  state.lastProgressReason = reason;
+  if (streamEvent) {
+    state.lastStreamEventAt = timestamp;
+    state.streamEventCount += 1;
+  }
+  if (toolActivity) {
+    state.lastToolActivityAt = timestamp;
+    state.toolActivityCount += 1;
+  }
   state.leaseExpiresAt = futureIso(workerLeaseMs);
+  return writeSdkWorkerState(cwd, state);
+}
+
+function updateHeartbeat(cwd: string, state: SdkWorkerState, step: string, workerLeaseMs: number): SdkWorkerState {
+  const changed = state.currentStep !== step;
+  state.currentStep = step;
+  return recordActivityProgress(cwd, state, changed ? `current step changed to ${step}` : `heartbeat for ${step}`, workerLeaseMs);
+}
+
+function recordArtifactProgress(cwd: string, state: SdkWorkerState, reason: string): SdkWorkerState {
+  const timestamp = nowIso();
+  state.lastArtifactProgressAt = timestamp;
+  state.lastProgressAt = timestamp;
+  state.progressCategory = "artifact_progress";
+  state.lastProgressReason = reason;
+  return writeSdkWorkerState(cwd, state);
+}
+
+function recordSemanticProgress(cwd: string, state: SdkWorkerState, reason: string): SdkWorkerState {
+  const timestamp = nowIso();
+  state.lastSemanticProgressAt = timestamp;
+  state.lastProgressAt = timestamp;
+  state.semanticProgressCount += 1;
+  state.progressCategory = "semantic_progress";
+  state.lastProgressReason = reason;
   return writeSdkWorkerState(cwd, state);
 }
 
@@ -207,8 +485,12 @@ function writeCheckpoint(cwd: string, state: SdkWorkerState, step: string, paylo
     )}\n`
   );
   state.lastCheckpointAt = timestamp;
-  state.lastProgressAt = timestamp;
+  state.checkpointCount += 1;
   state.currentStep = step;
+  state.lastArtifactProgressAt = timestamp;
+  state.lastProgressAt = timestamp;
+  state.progressCategory = "artifact_progress";
+  state.lastProgressReason = `checkpoint written for ${step}`;
   writeSdkWorkerState(cwd, state);
 }
 
@@ -225,8 +507,56 @@ function appendPartialEvidence(cwd: string, state: SdkWorkerState, sources: Rese
     appendFileSync(target, `${JSON.stringify({ recordedAt, step, source })}\n`);
   }
   state.partialEvidenceCount += sources.length;
+  state.sourcesFoundCount += sources.length;
+  state.lastArtifactProgressAt = recordedAt;
+  state.lastSemanticProgressAt = recordedAt;
   state.lastProgressAt = recordedAt;
+  state.semanticProgressCount += sources.length;
+  state.progressCategory = "semantic_progress";
+  state.lastProgressReason = `recorded ${sources.length} source(s)`;
   writeSdkWorkerState(cwd, state);
+}
+
+function recordThreadId(state: SdkWorkerState, threadId: string, replacementThread = false): void {
+  if (!threadId) return;
+  if (!state.threadIds.includes(threadId)) state.threadIds.push(threadId);
+  if (replacementThread && !state.replacementThreadIds.includes(threadId)) state.replacementThreadIds.push(threadId);
+  state.threadId = threadId;
+}
+
+function recordFailureTelemetry(state: SdkWorkerState, classification: SdkWorkerErrorClassification): void {
+  const timestamp = nowIso();
+  state.failureCategory = classification.category;
+  state.retryable = classification.retryable;
+  state.lastErrorMessageSanitized = classification.sanitizedMessage;
+  state.failureReason = classification.sanitizedMessage;
+  state.firstFailureAt = state.firstFailureAt ?? timestamp;
+  state.lastFailureAt = timestamp;
+  if (classification.category === "transient_network_error") state.transientNetworkErrorCount += 1;
+  if (classification.category === "rate_limit") state.rateLimitCount += 1;
+  if (classification.category === "sdk_timeout") state.sdkTimeoutCount += 1;
+  if (classification.category === "no_activity_progress") state.noActivityProgressCount += 1;
+  if (classification.category === "no_artifact_progress") state.noArtifactProgressCount += 1;
+  if (classification.category === "no_semantic_progress") state.noSemanticProgressCount += 1;
+}
+
+function retryContext(state: SdkWorkerState, sources: ResearchSource[]): string {
+  if (state.retryCount === 0) return "";
+  const sourceSummary = sources
+    .slice(0, 5)
+    .map((source) => `${source.title} (${source.url_or_ref})`)
+    .join(" | ");
+  return [
+    "",
+    "Retry context:",
+    `Previous failure category: ${state.failureCategory}.`,
+    `Previous sanitized error: ${state.lastErrorMessageSanitized || "not_recorded"}.`,
+    `Partial evidence count: ${state.partialEvidenceCount}.`,
+    sourceSummary ? `Already recorded sources: ${sourceSummary}.` : "",
+    "Preserve any prior valid evidence and continue within the same bucket scope."
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function addSourcesToEvidenceLedger(cwd: string, state: SdkWorkerState, sources: ResearchSource[], queries: string[], plan: CoveragePlan): void {
@@ -251,6 +581,7 @@ function addSourcesToEvidenceLedger(cwd: string, state: SdkWorkerState, sources:
 }
 
 function addNoSignalEvidence(cwd: string, state: SdkWorkerState, queries: string[], plan: CoveragePlan): void {
+  if (state.noSignalCount > 0) return;
   const question = plan.researchQuestions.find((candidate) => candidate.bucket === state.bucket);
   addEvidence(cwd, {
     runId: state.runId,
@@ -266,6 +597,8 @@ function addNoSignalEvidence(cwd: string, state: SdkWorkerState, queries: string
     perspectiveId: question?.perspectiveId ?? null,
     researchQuestionId: question?.id ?? null
   });
+  state.noSignalCount += 1;
+  recordSemanticProgress(cwd, state, "recorded searched-but-no-signal conclusion");
 }
 
 function maxSourcesPerWorker(options: SdkResearchPoolOptions): number {
@@ -273,6 +606,7 @@ function maxSourcesPerWorker(options: SdkResearchPoolOptions): number {
 }
 
 function writeFinalReport(cwd: string, state: SdkWorkerState, report: ResearcherReport): void {
+  const timestamp = nowIso();
   const target = researchRunSdkWorkerFinalReportPath(cwd, state.runId, state.bucket);
   ensureDir(dirname(target));
   writeFileSync(
@@ -282,7 +616,7 @@ function writeFinalReport(cwd: string, state: SdkWorkerState, report: Researcher
         runId: state.runId,
         workerId: state.workerId,
         threadId: state.threadId,
-        generatedAt: nowIso(),
+        generatedAt: timestamp,
         ...report,
         bucket: state.bucket
       },
@@ -290,6 +624,11 @@ function writeFinalReport(cwd: string, state: SdkWorkerState, report: Researcher
       2
     )}\n`
   );
+  state.lastArtifactProgressAt = timestamp;
+  state.lastProgressAt = timestamp;
+  state.progressCategory = "artifact_progress";
+  state.lastProgressReason = "final report written";
+  writeSdkWorkerState(cwd, state);
 }
 
 function extractJsonObject(raw: string): Record<string, unknown> | null {
@@ -354,6 +693,32 @@ function parseStepJson(raw: string, bucket: string): ParsedStepJson {
     uncertainties: asStringArray(object.uncertainties),
     recommended_followups: asStringArray(object.recommended_followups),
     need_more_work: asBool(object.need_more_work)
+  };
+}
+
+function parseCheckpointNudgeJson(raw: string, bucket: string): ParsedCheckpointNudge {
+  const object = extractJsonObject(raw);
+  if (!object || object.checkpoint !== true) {
+    return {
+      valid: false,
+      bucket,
+      currentStep: "",
+      sourcesFoundCount: 0,
+      queriesRun: [],
+      blocker: "invalid checkpoint JSON",
+      nextStep: "",
+      canContinue: false
+    };
+  }
+  return {
+    valid: true,
+    bucket: typeof object.bucket === "string" && object.bucket.trim() ? object.bucket.trim() : bucket,
+    currentStep: typeof object.currentStep === "string" ? object.currentStep : typeof object.current_step === "string" ? object.current_step : "",
+    sourcesFoundCount: typeof object.sourcesFoundCount === "number" ? object.sourcesFoundCount : typeof object.sources_found_count === "number" ? object.sources_found_count : 0,
+    queriesRun: asStringArray(object.queriesRun).length > 0 ? asStringArray(object.queriesRun) : asStringArray(object.queries_run),
+    blocker: typeof object.blocker === "string" ? object.blocker : "",
+    nextStep: typeof object.nextStep === "string" ? object.nextStep : typeof object.next_step === "string" ? object.next_step : "",
+    canContinue: object.canContinue !== false && object.can_continue !== false
   };
 }
 
@@ -430,6 +795,17 @@ function stepPrompt(
   ].join("\n");
 }
 
+function checkpointNudgePrompt(bucket: string, currentStep: string): string {
+  return [
+    "Write a checkpoint now. Return JSON only.",
+    "If no useful evidence has been found yet, explain current step and blocker.",
+    "Do not synthesize final answer.",
+    `Bucket: ${bucket}`,
+    `Current step: ${currentStep}`,
+    'JSON schema: {"checkpoint":true,"bucket":"...","currentStep":"...","sourcesFoundCount":0,"queriesRun":[],"blocker":"","nextStep":"","canContinue":true}.'
+  ].join("\n");
+}
+
 function threadOptions(cwd: string, bucket: string) {
   return {
     workingDirectory: cwd,
@@ -449,6 +825,8 @@ async function runCodexThreadStep(input: SdkResearchStepRunnerInput): Promise<Sd
   const streamed = await thread.runStreamed(input.prompt, { signal: input.signal });
   let finalText = "";
   for await (const event of streamed.events) {
+    input.onStreamEvent(event.type);
+    if (String(event.type).includes("tool")) input.onToolActivity(event.type);
     input.onHeartbeat(input.step);
     if (event.type === "thread.started") input.onThreadId(event.thread_id);
     const itemText = textFromEvent(event);
@@ -470,46 +848,81 @@ async function runStepWithControl(
   state: SdkWorkerState,
   step: SdkResearchStep,
   prompt: string,
-  globalDeadline: number
+  globalDeadline: number,
+  replacementThread = false,
+  control: { allowCheckpointNudge?: boolean; deadlineOverride?: number } = {}
 ): Promise<string> {
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_SDK_HEARTBEAT_INTERVAL_MS;
   const workerLeaseMs = options.workerLeaseMs ?? DEFAULT_SDK_WORKER_LEASE_MS;
-  const maxNoProgressHeartbeats = options.maxNoProgressHeartbeats ?? DEFAULT_SDK_MAX_NO_PROGRESS_HEARTBEATS;
+  const maxNoArtifactProgressIntervals = options.maxNoArtifactProgressIntervals ?? DEFAULT_SDK_MAX_NO_ARTIFACT_PROGRESS_INTERVALS;
+  const maxNoSemanticProgressIntervals = options.maxNoSemanticProgressIntervals ?? DEFAULT_SDK_MAX_NO_SEMANTIC_PROGRESS_INTERVALS;
   const runner = options.sdkStepRunner ?? runCodexThreadStep;
   const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   let interval: NodeJS.Timeout | undefined;
-  let lastProgressKey = `${state.partialEvidenceCount}:${state.lastCheckpointAt}`;
-  let noProgressHeartbeats = 0;
+  let lastActivityKey = `${state.activityEventCount}:${state.currentStep}`;
+  let lastArtifactKey = `${state.checkpointCount}:${state.partialEvidenceCount}:${state.sourcesFoundCount}`;
+  let lastSemanticKey = `${state.semanticProgressCount}:${state.sourcesFoundCount}:${state.queriesRunCount}:${state.noSignalCount}`;
+  let noArtifactProgressIntervals = 0;
+  let noSemanticProgressIntervals = 0;
+  const allowCheckpointNudge = control.allowCheckpointNudge ?? true;
 
   const stopPromise = new Promise<never>((_, reject) => {
-    const stop = (status: SdkWorkerStatus, reason: string) => {
+    const stop = (status: SdkWorkerStatus, reason: string, category: WorkerFailureCategory) => {
       controller.abort();
-      reject(new SdkWorkerStoppedError(reason, status));
+      reject(new SdkWorkerStoppedError(reason, status, category));
     };
-    const nextDeadline = Math.min(Date.parse(state.hardTimeoutAt), globalDeadline);
+    const nextDeadline = Math.min(Date.parse(state.hardTimeoutAt), globalDeadline, control.deadlineOverride ?? Number.POSITIVE_INFINITY);
     timer = setTimeout(() => {
-      stop("needs_resume", Date.now() >= globalDeadline ? "global budget exceeded" : "hard timeout exceeded");
+      stop("needs_resume", Date.now() >= globalDeadline ? "global budget exceeded" : "hard timeout exceeded", "hard_timeout");
     }, Math.max(0, nextDeadline - Date.now()));
     interval = setInterval(() => {
       const refreshed = readSdkWorkerState(options.cwd, state.runId, state.bucket) ?? state;
       if (refreshed.status === "cancelled") {
-        stop("cancelled", "worker cancelled");
+        stop("cancelled", "worker cancelled", "cancelled");
         return;
-      }
-      const progressKey = `${refreshed.partialEvidenceCount}:${refreshed.lastCheckpointAt}`;
-      if (progressKey === lastProgressKey) noProgressHeartbeats += 1;
-      else {
-        noProgressHeartbeats = 0;
-        lastProgressKey = progressKey;
       }
       if (Date.now() > Date.parse(refreshed.leaseExpiresAt)) {
-        stop("failed", "worker stalled: lease expired without heartbeat/progress");
+        refreshed.noActivityProgressCount += 1;
+        refreshed.progressCategory = "no_activity_progress";
+        refreshed.lastProgressReason = "worker stalled: lease expired without heartbeat/activity";
+        writeSdkWorkerState(options.cwd, refreshed);
+        stop("failed", "worker stalled: lease expired without heartbeat/activity", "no_activity_progress");
         return;
       }
+      const activityKey = `${refreshed.activityEventCount}:${refreshed.currentStep}`;
+      const artifactKey = `${refreshed.checkpointCount}:${refreshed.partialEvidenceCount}:${refreshed.sourcesFoundCount}`;
+      const semanticKey = `${refreshed.semanticProgressCount}:${refreshed.sourcesFoundCount}:${refreshed.queriesRunCount}:${refreshed.noSignalCount}`;
+      const activityChanged = activityKey !== lastActivityKey;
+      const artifactChanged = artifactKey !== lastArtifactKey;
+      const semanticChanged = semanticKey !== lastSemanticKey;
+      if (artifactChanged) {
+        noArtifactProgressIntervals = 0;
+        lastArtifactKey = artifactKey;
+      } else if (activityChanged) {
+        noArtifactProgressIntervals += 1;
+      }
+      if (semanticChanged) {
+        noSemanticProgressIntervals = 0;
+        lastSemanticKey = semanticKey;
+      } else if (artifactChanged) {
+        noSemanticProgressIntervals += 1;
+        if (noSemanticProgressIntervals >= maxNoSemanticProgressIntervals) {
+          refreshed.noSemanticProgressCount += 1;
+          refreshed.progressCategory = "no_semantic_progress";
+          refreshed.lastProgressReason = `artifact progress without semantic progress for ${noSemanticProgressIntervals} interval(s)`;
+          writeSdkWorkerState(options.cwd, refreshed);
+          noSemanticProgressIntervals = 0;
+        }
+      }
+      if (activityChanged) lastActivityKey = activityKey;
       Object.assign(state, refreshed);
-      if (noProgressHeartbeats >= maxNoProgressHeartbeats) {
-        stop("needs_resume", `no progress after ${noProgressHeartbeats} heartbeat(s)`);
+      if (allowCheckpointNudge && noArtifactProgressIntervals >= maxNoArtifactProgressIntervals) {
+        state.noArtifactProgressCount += 1;
+        state.progressCategory = "no_artifact_progress";
+        state.lastProgressReason = `activity without artifact progress for ${noArtifactProgressIntervals} interval(s)`;
+        writeSdkWorkerState(options.cwd, state);
+        stop("needs_resume", `no artifact progress after ${noArtifactProgressIntervals} activity interval(s); checkpoint nudge required`, "no_artifact_progress");
       }
     }, heartbeatIntervalMs);
   });
@@ -527,9 +940,15 @@ async function runStepWithControl(
         onHeartbeat: (currentStep) => {
           updateHeartbeat(options.cwd, state, currentStep, workerLeaseMs);
         },
+        onStreamEvent: (eventType) => {
+          recordActivityProgress(options.cwd, state, `stream event: ${eventType}`, workerLeaseMs, true, false);
+        },
+        onToolActivity: (eventType) => {
+          recordActivityProgress(options.cwd, state, `tool activity: ${eventType}`, workerLeaseMs, false, true);
+        },
         onThreadId: (threadId) => {
           if (threadId && threadId !== state.threadId) {
-            state.threadId = threadId;
+            recordThreadId(state, threadId, replacementThread);
             writeSdkWorkerState(options.cwd, state);
           }
         }
@@ -538,7 +957,7 @@ async function runStepWithControl(
     ]);
     if (typeof result === "string") return result;
     if (result.threadId) {
-      state.threadId = result.threadId;
+      recordThreadId(state, result.threadId, replacementThread);
       writeSdkWorkerState(options.cwd, state);
     }
     return result.text;
@@ -548,10 +967,15 @@ async function runStepWithControl(
   }
 }
 
-function terminalState(state: SdkWorkerState, status: SdkWorkerStatus, reason = ""): SdkWorkerState {
+function terminalState(state: SdkWorkerState, status: SdkWorkerStatus, reason = "", category?: WorkerFailureCategory): SdkWorkerState {
   state.status = status;
   state.endedAt = nowIso();
   state.failureReason = reason;
+  if (category) state.failureCategory = category;
+  if (category === "no_activity_progress" || category === "no_artifact_progress" || category === "no_semantic_progress") state.progressCategory = category as ProgressCategory;
+  state.finalAttemptStatus = status;
+  state.retryable = status === "completed" ? false : retryableCategory(state.failureCategory);
+  if (status === "completed" && state.retryCount > 0) state.retrySuccess = true;
   state.resumeAvailable = status === "needs_resume" || status === "timeout" || status === "failed";
   return state;
 }
@@ -567,6 +991,18 @@ function reportFromParts(bucket: string, queries: string[], sources: ResearchSou
   };
 }
 
+function finalStatusForFailure(status: SdkWorkerStatus, category: WorkerFailureCategory, state: SdkWorkerState, sourceCount: number): SdkWorkerStatus {
+  if (status === "cancelled" || category === "cancelled") return "cancelled";
+  if (category === "no_activity_progress") return "failed";
+  if (category === "no_artifact_progress") return sourceCount > 0 || Boolean(state.threadId) ? "needs_resume" : "failed";
+  if (category === "no_semantic_progress") return sourceCount > 0 || state.checkpointCount > 0 ? "needs_resume" : "failed";
+  if (category === "no_progress") return status === "failed" ? "failed" : "needs_resume";
+  if (category === "hard_timeout" || category === "sdk_timeout") return "needs_resume";
+  if ((category === "transient_network_error" || category === "rate_limit") && (sourceCount > 0 || Boolean(state.threadId))) return "needs_resume";
+  if (sourceCount > 0 && (status === "failed" || status === "timeout" || status === "needs_resume")) return "needs_resume";
+  return status;
+}
+
 function workerRunFromState(state: SdkWorkerState, report: ResearcherReport): SdkWorkerRun {
   return {
     runId: state.runId,
@@ -578,12 +1014,51 @@ function workerRunFromState(state: SdkWorkerState, report: ResearcherReport): Sd
     endedAt: state.endedAt ?? nowIso(),
     lastHeartbeatAt: state.lastHeartbeatAt,
     lastCheckpointAt: state.lastCheckpointAt,
+    lastActivityAt: state.lastActivityAt,
+    lastStreamEventAt: state.lastStreamEventAt,
+    lastToolActivityAt: state.lastToolActivityAt,
+    lastArtifactProgressAt: state.lastArtifactProgressAt,
+    lastSemanticProgressAt: state.lastSemanticProgressAt,
+    lastCheckpointNudgeAt: state.lastCheckpointNudgeAt,
     partialEvidenceCount: state.partialEvidenceCount,
+    activityEventCount: state.activityEventCount,
+    streamEventCount: state.streamEventCount,
+    toolActivityCount: state.toolActivityCount,
+    checkpointCount: state.checkpointCount,
+    semanticProgressCount: state.semanticProgressCount,
+    sourcesFoundCount: state.sourcesFoundCount,
+    queriesRunCount: state.queriesRunCount,
+    noSignalCount: state.noSignalCount,
+    checkpointNudgeCount: state.checkpointNudgeCount,
+    checkpointNudgeSuccessCount: state.checkpointNudgeSuccessCount,
+    checkpointNudgeFailedCount: state.checkpointNudgeFailedCount,
+    progressCategory: state.progressCategory,
+    noActivityProgressCount: state.noActivityProgressCount,
+    noArtifactProgressCount: state.noArtifactProgressCount,
+    noSemanticProgressCount: state.noSemanticProgressCount,
+    lastProgressReason: state.lastProgressReason,
     currentStep: state.currentStep,
     sources_found_count: report.sources_found.length,
     searched_but_no_signal: report.searched_but_no_signal,
     failure_reason: state.failureReason,
-    resumeAvailable: state.resumeAvailable
+    resumeAvailable: state.resumeAvailable,
+    failureCategory: state.failureCategory,
+    retryable: state.retryable,
+    retryCount: state.retryCount,
+    maxRetries: state.maxRetries,
+    lastErrorMessageSanitized: state.lastErrorMessageSanitized,
+    attemptCount: state.attemptCount,
+    transientNetworkErrorCount: state.transientNetworkErrorCount,
+    rateLimitCount: state.rateLimitCount,
+    sdkTimeoutCount: state.sdkTimeoutCount,
+    retrySuccess: state.retrySuccess,
+    finalAttemptStatus: state.finalAttemptStatus,
+    threadIds: state.threadIds,
+    resumedThreadIds: state.resumedThreadIds,
+    replacementThreadIds: state.replacementThreadIds,
+    timeLostToBackoffMs: state.timeLostToBackoffMs,
+    firstFailureAt: state.firstFailureAt,
+    lastFailureAt: state.lastFailureAt
   };
 }
 
@@ -638,7 +1113,8 @@ async function runWorker(options: SdkResearchPoolOptions, bucket: string, global
 
   const entry = entryForBucket(options.sourceMatrix, bucket);
   const workerLeaseMs = options.workerLeaseMs ?? DEFAULT_SDK_WORKER_LEASE_MS;
-  let state = existing ?? initialWorkerState(options, bucket);
+  let state = normalizeWorkerState(existing ?? initialWorkerState(options, bucket), options);
+  state.maxRetries = options.maxRetriesPerWorker ?? DEFAULT_SDK_MAX_RETRIES_PER_WORKER;
   state.status = "running";
   state.endedAt = null;
   state.failureReason = "";
@@ -649,6 +1125,7 @@ async function runWorker(options: SdkResearchPoolOptions, bucket: string, global
   writeSdkWorkerState(options.cwd, state);
 
   const queries: string[] = [];
+  const queryKeys = new Set<string>();
   const sources: ResearchSource[] = [];
   const sourceKeys = new Set<string>();
   const uncertainties: string[] = [];
@@ -657,7 +1134,17 @@ async function runWorker(options: SdkResearchPoolOptions, bucket: string, global
   let needMoreWork = false;
 
   function mergeParsed(parsed: ParsedStepJson, step: string): void {
-    queries.push(...parsed.queries_run);
+    const newQueries = parsed.queries_run.filter((query) => {
+      const key = query.trim().toLowerCase();
+      if (!key || queryKeys.has(key)) return false;
+      queryKeys.add(key);
+      return true;
+    });
+    queries.push(...newQueries);
+    if (newQueries.length > 0) {
+      state.queriesRunCount += newQueries.length;
+      recordSemanticProgress(options.cwd, state, `recorded ${newQueries.length} new query/query target(s)`);
+    }
     uncertainties.push(...parsed.uncertainties);
     followups.push(...parsed.recommended_followups);
     searchedButNoSignal = searchedButNoSignal || parsed.searched_but_no_signal;
@@ -673,21 +1160,121 @@ async function runWorker(options: SdkResearchPoolOptions, bucket: string, global
       appendPartialEvidence(options.cwd, state, newSources, step);
       addSourcesToEvidenceLedger(options.cwd, state, newSources, parsed.queries_run, options.coveragePlan);
     }
+    if (parsed.searched_but_no_signal && sources.length === 0) {
+      state.noSignalCount += 1;
+      recordSemanticProgress(options.cwd, state, "worker reported searched-but-no-signal");
+    }
   }
 
-  try {
+  async function runAndParseStep(step: SdkResearchStep, stepLabel: string, replacementThread: boolean): Promise<void> {
+    for (;;) {
+      try {
+        state = updateHeartbeat(options.cwd, state, step, workerLeaseMs);
+        let prompt = stepPrompt(options, entry, step, { queries, sourceCount: sources.length, needMoreWork });
+        prompt += retryContext(state, sources);
+        let text = await runStepWithControl(options, state, step, prompt, globalDeadline, replacementThread);
+        if (step === "final_report" && extractJsonObject(text) === null) {
+          const repairMessage = "invalid JSON final report";
+          const classification = classifySdkWorkerError(repairMessage);
+          state.failureCategory = classification.category;
+          state.retryable = false;
+          state.lastErrorMessageSanitized = classification.sanitizedMessage;
+          writeSdkWorkerState(options.cwd, state);
+          const repairPrompt = [
+            prompt,
+            "",
+            "The previous final report was not valid JSON.",
+            "Return only one valid JSON object matching the requested final bucket report schema.",
+            `Previous output excerpt: ${text.slice(0, 2000)}`
+          ].join("\n");
+          text = await runStepWithControl(options, state, step, repairPrompt, globalDeadline, replacementThread);
+          if (extractJsonObject(text) === null) throw new SdkWorkerClassifiedError(repairMessage, "invalid_json");
+        }
+        const parsed = parseStepJson(text, bucket);
+        mergeParsed(parsed, stepLabel);
+        writeCheckpoint(options.cwd, state, stepLabel, { raw: text, parsed });
+        return;
+      } catch (error) {
+        if (!(error instanceof SdkWorkerStoppedError) || error.category !== "no_artifact_progress") throw error;
+        const nudged = await runCheckpointNudge(step, replacementThread);
+        if (!nudged) throw error;
+      }
+    }
+  }
+
+  async function runCheckpointNudge(step: SdkResearchStep, replacementThread: boolean): Promise<boolean> {
+    const maxNudges = options.maxCheckpointNudges ?? DEFAULT_SDK_MAX_CHECKPOINT_NUDGES;
+    if (state.checkpointNudgeCount >= maxNudges) {
+      state.noArtifactProgressCount += 1;
+      state.progressCategory = "no_artifact_progress";
+      state.lastProgressReason = "max checkpoint nudges exceeded";
+      writeSdkWorkerState(options.cwd, state);
+      return false;
+    }
+    state.checkpointNudgeCount += 1;
+    state.lastCheckpointNudgeAt = nowIso();
+    state.currentStep = `checkpoint_nudge:${step}`;
+    writeSdkWorkerState(options.cwd, state);
+    try {
+      const deadline = Math.min(globalDeadline, Date.now() + (options.checkpointNudgeTimeoutMs ?? DEFAULT_SDK_CHECKPOINT_NUDGE_TIMEOUT_MS));
+      const raw = await runStepWithControl(options, state, "checkpoint_nudge", checkpointNudgePrompt(bucket, step), globalDeadline, replacementThread, {
+        allowCheckpointNudge: false,
+        deadlineOverride: deadline
+      });
+      const parsed = parseCheckpointNudgeJson(raw, bucket);
+      if (!parsed.valid) {
+        state.checkpointNudgeFailedCount += 1;
+        state.lastProgressReason = "checkpoint nudge returned invalid JSON";
+        writeSdkWorkerState(options.cwd, state);
+        return false;
+      }
+      state.checkpointNudgeSuccessCount += 1;
+      if (parsed.currentStep) state.currentStep = parsed.currentStep;
+      if (parsed.blocker) {
+        uncertainties.push(`checkpoint blocker: ${parsed.blocker}`);
+        state.lastProgressReason = `checkpoint nudge blocker: ${parsed.blocker}`;
+      } else {
+        state.lastProgressReason = "checkpoint nudge succeeded";
+      }
+      const newQueries = parsed.queriesRun.filter((query) => {
+        const key = query.trim().toLowerCase();
+        if (!key || queryKeys.has(key)) return false;
+        queryKeys.add(key);
+        return true;
+      });
+      if (newQueries.length > 0) {
+        queries.push(...newQueries);
+        state.queriesRunCount += newQueries.length;
+        recordSemanticProgress(options.cwd, state, `checkpoint nudge recorded ${newQueries.length} query/query target(s)`);
+      }
+      writeCheckpoint(options.cwd, state, `checkpoint_nudge_${state.checkpointNudgeCount}`, { raw, parsed });
+      return parsed.canContinue;
+    } catch (error) {
+      state.checkpointNudgeFailedCount += 1;
+      state.lastProgressReason = `checkpoint nudge failed: ${sanitizeErrorMessage(error)}`;
+      writeSdkWorkerState(options.cwd, state);
+      return false;
+    }
+  }
+
+  let forceReplacementThread = false;
+  for (;;) {
+    const replacementThread = forceReplacementThread;
+    forceReplacementThread = false;
+    if (replacementThread) {
+      state.threadId = "";
+      writeSdkWorkerState(options.cwd, state);
+    }
+    const attemptStartedWithThreadId = Boolean(state.threadId);
+    state.attemptCount += 1;
+    if (state.retryCount > 0 && attemptStartedWithThreadId && !state.resumedThreadIds.includes(state.threadId)) {
+      state.resumedThreadIds.push(state.threadId);
+    }
+    writeSdkWorkerState(options.cwd, state);
+
+    try {
     for (const step of ["plan", "partial_evidence", "final_report"] as const) {
-      state = updateHeartbeat(options.cwd, state, step, workerLeaseMs);
-      const text = await runStepWithControl(
-        options,
-        state,
-        step,
-        stepPrompt(options, entry, step, { queries, sourceCount: sources.length, needMoreWork }),
-        globalDeadline
-      );
-      const parsed = parseStepJson(text, bucket);
-      mergeParsed(parsed, step);
-      writeCheckpoint(options.cwd, state, step, { raw: text, parsed });
+      await runAndParseStep(step, step, replacementThread);
       if (Date.now() > Date.parse(state.softTimeoutAt) && sources.length === 0 && !needMoreWork) break;
     }
     let extraRounds = 0;
@@ -695,17 +1282,7 @@ async function runWorker(options: SdkResearchPoolOptions, bucket: string, global
     while (needMoreWork && extraRounds < maxExtraRounds && sources.length < maxSourcesPerWorker(options)) {
       extraRounds += 1;
       for (const step of ["partial_evidence", "final_report"] as const) {
-        state = updateHeartbeat(options.cwd, state, step, workerLeaseMs);
-        const text = await runStepWithControl(
-          options,
-          state,
-          step,
-          stepPrompt(options, entry, step, { queries, sourceCount: sources.length, needMoreWork }),
-          globalDeadline
-        );
-        const parsed = parseStepJson(text, bucket);
-        mergeParsed(parsed, `${step}_${extraRounds}`);
-        writeCheckpoint(options.cwd, state, `${step}_${extraRounds}`, { raw: text, parsed });
+        await runAndParseStep(step, `${step}_${extraRounds}`, replacementThread);
       }
     }
     if (sources.length === 0 && searchedButNoSignal) addNoSignalEvidence(options.cwd, state, queries, options.coveragePlan);
@@ -715,17 +1292,49 @@ async function runWorker(options: SdkResearchPoolOptions, bucket: string, global
     writeSdkWorkerState(options.cwd, state);
     const workerRun = workerRunFromState(state, report);
     return { state, report, run: agentRunFromWorker(workerRun, report), sources };
-  } catch (error) {
-    const status = error instanceof SdkWorkerStoppedError ? error.status : "failed";
-    const reason = error instanceof Error ? error.message : String(error);
-    if (sources.length === 0 && searchedButNoSignal) addNoSignalEvidence(options.cwd, state, queries, options.coveragePlan);
-    const partialStatus: SdkWorkerStatus = sources.length > 0 && (status === "failed" || status === "timeout" || status === "needs_resume") ? "needs_resume" : status;
-    terminalState(state, partialStatus, reason);
-    writeSdkWorkerState(options.cwd, state);
-    const report = reportFromParts(bucket, queries.length > 0 ? queries : entry.querySeeds, sources, searchedButNoSignal, uncertainties.concat(reason), followups);
-    if (sources.length > 0) writeFinalReport(options.cwd, state, report);
-    const workerRun = workerRunFromState(state, report);
-    return { state, report, run: agentRunFromWorker(workerRun, report), sources };
+    } catch (error) {
+      const stoppedStatus = error instanceof SdkWorkerStoppedError ? error.status : "failed";
+      const classification =
+        error instanceof SdkWorkerStoppedError
+          ? { category: error.category, retryable: retryableCategory(error.category), sanitizedMessage: sanitizeErrorMessage(error) }
+          : error instanceof SdkWorkerClassifiedError
+            ? { category: error.category, retryable: retryableCategory(error.category), sanitizedMessage: sanitizeErrorMessage(error) }
+            : classifySdkWorkerError(error);
+      recordFailureTelemetry(state, classification);
+
+      const canRetry = classification.retryable && state.retryCount < state.maxRetries && Date.now() < globalDeadline;
+      if (canRetry) {
+        state.retryCount += 1;
+        const backoff = retryBackoffMs(options, state.retryCount);
+        const retryAt = nowIso();
+        state.lastRetryAt = retryAt;
+        state.retryBackoffMs = backoff;
+        state.nextRetryAt = new Date(Date.parse(retryAt) + backoff).toISOString();
+        state.currentStep = `retry_${state.retryCount}`;
+        state.status = "running";
+        state.endedAt = null;
+        state.resumeAvailable = true;
+        state.leaseExpiresAt = futureIso(workerLeaseMs);
+        if (classification.category === "transient_network_error" && attemptStartedWithThreadId && state.retryCount >= 2) {
+          forceReplacementThread = true;
+        }
+        writeSdkWorkerState(options.cwd, state);
+        await sleep(backoff);
+        state.timeLostToBackoffMs += backoff;
+        state.nextRetryAt = null;
+        writeSdkWorkerState(options.cwd, state);
+        continue;
+      }
+
+      if (sources.length === 0 && searchedButNoSignal) addNoSignalEvidence(options.cwd, state, queries, options.coveragePlan);
+      const finalStatus = finalStatusForFailure(stoppedStatus, classification.category, state, sources.length);
+      terminalState(state, finalStatus, classification.sanitizedMessage, classification.category);
+      writeSdkWorkerState(options.cwd, state);
+      const report = reportFromParts(bucket, queries.length > 0 ? queries : entry.querySeeds, sources, searchedButNoSignal, uncertainties.concat(classification.sanitizedMessage), followups);
+      if (sources.length > 0) writeFinalReport(options.cwd, state, report);
+      const workerRun = workerRunFromState(state, report);
+      return { state, report, run: agentRunFromWorker(workerRun, report), sources };
+    }
   }
 }
 

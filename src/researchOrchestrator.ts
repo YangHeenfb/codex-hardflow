@@ -40,7 +40,8 @@ import type {
   SubagentReport,
   SubagentReportStatus,
   SourceCoverageMatrix,
-  TriggerSource
+  TriggerSource,
+  CoverageMode
 } from "./schemas.js";
 import { currentResearchReportPath, researchRunMetadataPath, researchRunReportPath, researchRunRouterTracePath, researchRunSubagentsDir, researchSubagentReportPath } from "./paths.js";
 import { createHookMarker, hashText, resolveLatestActiveMarker } from "./hookState.js";
@@ -86,6 +87,7 @@ export interface BuildResearchReportOptions {
   sdkWorkerStatus?: SdkWorkerPoolStatus;
   sdkWorkerRuns?: SdkWorkerRun[];
   appSubagentStatus?: ResearchReport["app_subagent_status"];
+  coverageMode?: CoverageMode;
 }
 
 export interface RunResearchOptions extends BuildResearchReportOptions {
@@ -106,7 +108,16 @@ export interface RunResearchOptions extends BuildResearchReportOptions {
   heartbeatIntervalMs?: number;
   maxNoProgressHeartbeats?: number;
   maxSourcesPerWorker?: number;
+  maxRetriesPerWorker?: number;
+  retryInitialBackoffMs?: number;
+  retryMaxBackoffMs?: number;
+  retryJitter?: boolean;
+  maxNoArtifactProgressIntervals?: number;
+  maxNoSemanticProgressIntervals?: number;
+  checkpointNudgeTimeoutMs?: number;
+  maxCheckpointNudges?: number;
   globalBudgetMs?: number;
+  coverageMode?: CoverageMode;
   sdkPromptRunner?: (prompt: string, cwd: string, bucket: string) => Promise<string>;
   sdkStepRunner?: SdkResearchStepRunner;
   defaultDiscoveryBuckets?: string[];
@@ -221,7 +232,8 @@ function sourceMatrixForTask(task: string, options: BuildResearchReportOptions):
     normalizedTask: parts.normalizedTask,
     classificationInput: parts.classificationInput,
     runId: options.runId,
-    routerOutput: options.routerOutput
+    routerOutput: options.routerOutput,
+    coverageMode: options.coverageMode
   });
   return {
     ...matrix,
@@ -328,6 +340,10 @@ function hasProgrammaticWorkerRuns(agentRuns: ResearchAgentRun[], mergedSubagent
   return agentRuns.some((run) => !run.fallback_used && run.status !== "manual_fallback") || mergedSubagentReports.length > 0;
 }
 
+function completedRequiredStatus(status: ResearchBucketStatus | undefined): boolean {
+  return status === "completed" || status === "manual_backfilled" || status === "searched_but_no_signal";
+}
+
 export function buildResearchReport(
   task: string,
   defaultDiscoveryBuckets: string[] = [],
@@ -405,7 +421,15 @@ export function buildResearchReport(
     router_trace_reuse_reason: options.routerTraceReuseReason,
     router_trace_stale_reason: options.routerTraceStaleReason,
     source_matrix: matrix,
+    coverageMode: matrix.coverageMode,
     required_buckets: requiredBuckets,
+    requiredBucketCount: requiredBuckets.length,
+    completedRequiredBucketCount: requiredBuckets.filter((bucket) => completedRequiredStatus(bucketStatuses[bucket])).length,
+    searchedButNoSignalCount: requiredBuckets.filter((bucket) => bucketStatuses[bucket] === "searched_but_no_signal").length,
+    excludedBucketCount: matrix.excludedBuckets?.length ?? 0,
+    excludedBuckets: matrix.excludedBuckets ?? [],
+    skippedPossibleBuckets: matrix.skippedPossibleBuckets ?? [],
+    coverageDebt: matrix.coverageDebt ?? [],
     bucket_statuses: bucketStatuses,
     agent_runs: agentRuns,
     researcher_reports: researcherReports,
@@ -418,7 +442,7 @@ export function buildResearchReport(
     },
     useful_findings: [],
     conflicting_findings: [],
-    source_gaps: requiredBuckets.filter((bucket) => bucketStatuses[bucket] !== "completed"),
+    source_gaps: requiredBuckets.filter((bucket) => !completedRequiredStatus(bucketStatuses[bucket])),
     confidence_summary:
       runnerMode === "app_handoff"
         ? "App handoff initialized; final confidence depends on backfilled App/manual/subagent evidence."
@@ -721,6 +745,21 @@ function applySdkReportFindings(report: ResearchReport, pool: SdkResearchPoolRes
   report.citations_or_refs = [...new Set([...report.citations_or_refs, ...refs])];
 }
 
+function refreshCoverageSummary(report: ResearchReport): void {
+  const requiredBuckets = report.required_buckets ?? [];
+  report.coverageMode = report.coverageMode ?? report.source_matrix?.coverageMode;
+  report.requiredBucketCount = requiredBuckets.length;
+  report.completedRequiredBucketCount = requiredBuckets.filter((bucket) => completedRequiredStatus(report.bucket_statuses?.[bucket])).length;
+  const statusNoSignal = requiredBuckets.filter((bucket) => report.bucket_statuses?.[bucket] === "searched_but_no_signal");
+  report.searched_but_no_signal = [...new Set([...(report.searched_but_no_signal ?? []), ...statusNoSignal])];
+  report.searchedButNoSignalCount = report.searched_but_no_signal.length;
+  report.excludedBuckets = report.source_matrix?.excludedBuckets ?? report.excludedBuckets ?? [];
+  report.excludedBucketCount = report.excludedBuckets.length;
+  report.skippedPossibleBuckets = report.source_matrix?.skippedPossibleBuckets ?? report.skippedPossibleBuckets ?? [];
+  report.coverageDebt = report.source_matrix?.coverageDebt ?? report.coverageDebt ?? [];
+  report.source_gaps = requiredBuckets.filter((bucket) => !completedRequiredStatus(report.bucket_statuses?.[bucket]));
+}
+
 function mergeSdkPoolIntoReport(cwd: string, report: ResearchReport, pool: SdkResearchPoolResult, plan: CoveragePlan): ResearchReport {
   const reportByBucket = new Map(report.researcher_reports.map((item) => [item.bucket, item]));
   for (const sdkReport of pool.researcherReports) {
@@ -765,7 +804,6 @@ function mergeSdkPoolIntoReport(cwd: string, report: ResearchReport, pool: SdkRe
   report.evidence_mode = report.evidence_mode && report.evidence_mode !== "none" && report.evidence_mode !== "sdk_threads" ? "mixed" : "sdk_threads";
   report.status = sdkReportStatus(report.runner_mode, pool, report, plan);
   report.manual_backfill_required = report.status !== "completed";
-  report.source_gaps = report.required_buckets.filter((bucket) => report.bucket_statuses[bucket] !== "completed" && report.bucket_statuses[bucket] !== "searched_but_no_signal");
   applySdkReportFindings(report, pool);
   return writeResearchReport(cwd, report);
 }
@@ -803,6 +841,7 @@ function writeParentResearchReport(cwd: string, report: ResearchReport, updateCu
   const now = new Date().toISOString();
   report.generatedAt = report.generatedAt || now;
   if (updateCurrent) report.currentPointerUpdatedAt = now;
+  refreshCoverageSummary(report);
   const runTarget = researchRunReportPath(cwd, report.runId);
   mkdirSync(dirname(runTarget), { recursive: true });
   writeFileSync(runTarget, `${JSON.stringify(report, null, 2)}\n`);
@@ -942,7 +981,8 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     cwd,
     buildCoveragePlan(routerOutput, parts.rawUserPrompt, {
       runId: marker.runId,
-      normalizedTask: parts.normalizedTask
+      normalizedTask: parts.normalizedTask,
+      coverageMode: options.coverageMode
     })
   );
 
@@ -956,7 +996,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     strictProgrammatic: options.strictProgrammatic
   };
 
-  const strictRequiredBuckets = coveragePlan.sourceBuckets.filter((bucket) => bucket.required).map((bucket) => bucket.bucket);
+  const strictRequiredBuckets = coveragePlan.requiredBuckets.length > 0 ? coveragePlan.requiredBuckets : coveragePlan.sourceBuckets.filter((bucket) => bucket.required).map((bucket) => bucket.bucket);
   if (runnerMode === "strict_programmatic" && strictRequiredBuckets.length === 0) {
     const failureReason = "strict_programmatic requires non-empty required buckets";
     const report = buildResearchReport(task, options.defaultDiscoveryBuckets ?? [], "failed", {
@@ -1118,6 +1158,8 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     return writeParentResearchReport(cwd, report, true);
   }
   const requiredBuckets = requiredEntries.map((entry) => String(entry.bucket));
+  const defaultMaxConcurrentBuckets =
+    runnerMode === "strict_programmatic" && coveragePlan.coverageMode === "exhaustive" ? Math.max(1, requiredBuckets.length) : DEFAULT_SDK_MAX_CONCURRENT_BUCKETS;
   const pool = await runSdkResearchPool({
     runId: marker.runId,
     rawUserPrompt: parts.rawUserPrompt,
@@ -1126,7 +1168,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     sourceMatrix: matrix,
     requiredBuckets,
     cwd,
-    maxConcurrentBuckets: options.maxConcurrentBuckets ?? DEFAULT_SDK_MAX_CONCURRENT_BUCKETS,
+    maxConcurrentBuckets: options.maxConcurrentBuckets ?? defaultMaxConcurrentBuckets,
     workerLeaseMs: options.workerLeaseMs ?? DEFAULT_SDK_WORKER_LEASE_MS,
     softTimeoutMs: options.softTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_SOFT_TIMEOUT_MS,
     hardTimeoutMs: options.hardTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_HARD_TIMEOUT_MS,
@@ -1134,6 +1176,14 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_SDK_HEARTBEAT_INTERVAL_MS,
     maxNoProgressHeartbeats: options.maxNoProgressHeartbeats ?? DEFAULT_SDK_MAX_NO_PROGRESS_HEARTBEATS,
     maxSourcesPerWorker: options.maxSourcesPerWorker,
+    maxRetriesPerWorker: options.maxRetriesPerWorker,
+    retryInitialBackoffMs: options.retryInitialBackoffMs,
+    retryMaxBackoffMs: options.retryMaxBackoffMs,
+    retryJitter: options.retryJitter,
+    maxNoArtifactProgressIntervals: options.maxNoArtifactProgressIntervals,
+    maxNoSemanticProgressIntervals: options.maxNoSemanticProgressIntervals,
+    checkpointNudgeTimeoutMs: options.checkpointNudgeTimeoutMs,
+    maxCheckpointNudges: options.maxCheckpointNudges,
     sdkStepRunner: legacyStepRunner(options)
   });
   if (runnerMode === "strict_programmatic" && pool.workerRuns.length === 0) {
@@ -1225,7 +1275,7 @@ export async function resumeResearchRun(cwd: string, runId: string, options: Run
     sourceMatrix: report.source_matrix,
     requiredBuckets: resumableBuckets,
     cwd,
-    maxConcurrentBuckets: options.maxConcurrentBuckets ?? DEFAULT_SDK_MAX_CONCURRENT_BUCKETS,
+    maxConcurrentBuckets: options.maxConcurrentBuckets ?? (plan.coverageMode === "exhaustive" ? Math.max(1, resumableBuckets.length) : DEFAULT_SDK_MAX_CONCURRENT_BUCKETS),
     workerLeaseMs: options.workerLeaseMs ?? DEFAULT_SDK_WORKER_LEASE_MS,
     softTimeoutMs: options.softTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_SOFT_TIMEOUT_MS,
     hardTimeoutMs: options.hardTimeoutMs ?? options.perBucketTimeoutMs ?? options.sdkTimeoutMs ?? DEFAULT_SDK_HARD_TIMEOUT_MS,
@@ -1233,6 +1283,14 @@ export async function resumeResearchRun(cwd: string, runId: string, options: Run
     heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_SDK_HEARTBEAT_INTERVAL_MS,
     maxNoProgressHeartbeats: options.maxNoProgressHeartbeats ?? DEFAULT_SDK_MAX_NO_PROGRESS_HEARTBEATS,
     maxSourcesPerWorker: options.maxSourcesPerWorker,
+    maxRetriesPerWorker: options.maxRetriesPerWorker,
+    retryInitialBackoffMs: options.retryInitialBackoffMs,
+    retryMaxBackoffMs: options.retryMaxBackoffMs,
+    retryJitter: options.retryJitter,
+    maxNoArtifactProgressIntervals: options.maxNoArtifactProgressIntervals,
+    maxNoSemanticProgressIntervals: options.maxNoSemanticProgressIntervals,
+    checkpointNudgeTimeoutMs: options.checkpointNudgeTimeoutMs,
+    maxCheckpointNudges: options.maxCheckpointNudges,
     sdkStepRunner: legacyStepRunner(options),
     resume: true
   });
@@ -1596,23 +1654,30 @@ export function assertResearchReportEvidence(report: ResearchReport, options: Re
     : report.required_buckets ?? [];
   const isResearchHeavy = options.researchHeavy ?? /research|troubleshoot|current|solution|architecture|framework/i.test(report.taskType);
 
-  if (report.runner_mode === "app_handoff" && (report.searched_sources_table ?? []).length === 0) {
+  const hasNoSignal = hasNoSignalEvidence(report);
+  if (report.runner_mode === "app_handoff" && (report.searched_sources_table ?? []).length === 0 && !hasNoSignal) {
     return {
       passed: false,
       reason: "app_handoff research_report has no evidence yet. Spawn App subagents or backfill manual sources via codex-hardflow report add-source."
     };
   }
-  if (report.runner_mode === "manual_fallback" && (report.searched_sources_table ?? []).length === 0) {
+  if (report.runner_mode === "manual_fallback" && (report.searched_sources_table ?? []).length === 0 && !hasNoSignal) {
     return { passed: false, reason: "manual_fallback research_report has no sources. Backfill sources before relying on it." };
   }
   const statuses = requiredBuckets.map((bucket) => report.bucket_statuses?.[bucket]);
+  if (report.coverageMode === "exhaustive") {
+    const missingRequired = requiredBuckets.filter((bucket) => !completedRequiredStatus(report.bucket_statuses?.[bucket]) && sourcesForBucket(report, bucket).length === 0);
+    if (missingRequired.length > 0) {
+      return { passed: false, reason: `exhaustive coverage missing required bucket evidence/no-signal/exclusion: ${missingRequired.join(", ")}.` };
+    }
+  }
   if (report.runner_mode === "sdk_threads" && statuses.length > 0 && statuses.every((status) => status === "timeout")) {
     return { passed: false, reason: "sdk_threads research_report has all required buckets timed out; require degraded-mode confirmation or manual backfill." };
   }
   if (report.status === "failed" || (statuses.length > 0 && statuses.every(failureOnlyStatus))) {
     return { passed: false, reason: "research_report evidence gate failed: all required buckets are timeout/failed/context_exhausted/manual_fallback without usable evidence." };
   }
-  if (isResearchHeavy && (report.searched_sources_table ?? []).length === 0) {
+  if (isResearchHeavy && (report.searched_sources_table ?? []).length === 0 && !hasNoSignal) {
     return { passed: false, reason: "research-heavy report evidence gate failed: searched_sources_table is empty." };
   }
   if ((report.useful_findings ?? []).length === 0 && !hasNoSignalEvidence(report)) {
@@ -1651,6 +1716,14 @@ export function researchReportSummary(cwd: string, runId?: string): Record<strin
     generatedAt: report.generatedAt,
     status: report.status,
     runner_mode: report.runner_mode,
+    coverageMode: report.coverageMode,
+    requiredBucketCount: report.requiredBucketCount,
+    completedRequiredBucketCount: report.completedRequiredBucketCount,
+    searchedButNoSignalCount: report.searchedButNoSignalCount,
+    excludedBucketCount: report.excludedBucketCount,
+    excludedBuckets: report.excludedBuckets,
+    skippedPossibleBuckets: report.skippedPossibleBuckets,
+    coverageDebt: report.coverageDebt,
     app_handoff_required: report.app_handoff_required,
     sdk_threads_started: report.sdk_threads_started,
     sdk_threads_allowed: report.sdk_threads_allowed,

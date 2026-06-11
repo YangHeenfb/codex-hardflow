@@ -151,16 +151,12 @@ describe("hook marker Stop gate", () => {
       runnerMode: "app_handoff",
       input: { turnId: "turn-runid-stop" }
     });
-    for (const [bucket, url] of [
-      ["official_docs", "https://example.com/docs"],
-      ["github", "https://github.com/example/repo"],
-      ["codex_default_discovery", "https://example.com/default"]
-    ] as const) {
+    for (const bucket of report.required_buckets) {
       addManualSourceToReport(cwd, {
         runId: report.runId,
         bucket,
         title: `${bucket} source`,
-        url_or_ref: url,
+        url_or_ref: `https://example.com/${bucket}`,
         claim: `${bucket} reviewed.`,
         finding: `${bucket} finding.`
       });

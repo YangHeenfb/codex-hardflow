@@ -366,6 +366,17 @@ export const SEARCH_ENGINE_REGISTRY: SearchEngineManifest[] = [
     expectedOutputSchema: SOURCE_SCHEMA,
     defaultLimit: 10,
     riskLevel: "medium"
+  },
+  {
+    name: "private_connector_search",
+    bucket: "private_connectors",
+    description: "Search explicitly requested private/internal connectors only when a safe connector is configured.",
+    available: false,
+    deterministic: false,
+    requiresNetwork: true,
+    expectedOutputSchema: SOURCE_SCHEMA,
+    defaultLimit: 5,
+    riskLevel: "high"
   }
 ];
 

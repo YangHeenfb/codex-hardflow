@@ -7,6 +7,7 @@ import { cliPathStatus } from "./cliPaths.js";
 import { codexRunnerStatus } from "./codexRunner.js";
 import { installGlobal, SDK_VERSION } from "./config.js";
 import { evaluateCoverage } from "./coverageEval.js";
+import { parseCsv, parseNumberCsv, runDiagnostics, type DiagnosticsCommand } from "./diagnostics/sdkDiagnostics.js";
 import { requireExecutorManifest } from "./executionOrchestrator.js";
 import { parseFlagArgs, type ParsedFlags } from "./flagParser.js";
 import { appendHookEvent, assertHookActive, hookStatus } from "./hookEvents.js";
@@ -34,7 +35,7 @@ import {
 } from "./researchOrchestrator.js";
 import { runLlmRouter } from "./router/llmRouter.js";
 import type { RouterTraceOwner } from "./router/routerSchema.js";
-import type { Confidence, ResearchRunnerMode, ResearchSource, SubagentReportStatus } from "./schemas.js";
+import type { Confidence, CoverageMode, ResearchRunnerMode, ResearchSource, SubagentReportStatus } from "./schemas.js";
 import { validate } from "./validationOrchestrator.js";
 
 const require = createRequire(import.meta.url);
@@ -68,6 +69,16 @@ function booleanFlag(flags: ParsedFlags, key: string): boolean {
 
 function validRunnerMode(value: string | undefined): value is ResearchRunnerMode {
   return value === "app_handoff" || value === "sdk_threads" || value === "strict_programmatic" || value === "manual_fallback" || value === "mixed";
+}
+
+function coverageModeFlag(value: string | undefined): CoverageMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === "exhaustive" || value === "balanced" || value === "fast") return value;
+  throw new Error(`Invalid --coverage-mode: ${value}`);
+}
+
+function validDiagnosticsCommand(value: string | undefined): value is DiagnosticsCommand {
+  return value === "sdk-concurrency" || value === "sdk-prompt-width" || value === "sdk-bucket-difficulty" || value === "sdk-timeout-sweep" || value === "sdk-checkpoint-resume";
 }
 
 function routerOwnerFlag(value: string | undefined): RouterTraceOwner {
@@ -345,6 +356,7 @@ async function main(): Promise<void> {
             runnerMode,
             executeSdkResearch,
             strictProgrammatic,
+            coverageMode: coverageModeFlag(stringFlag(parsed.flags, "coverage-mode")),
             runRouter: booleanFlag(parsed.flags, "run-router"),
             maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
             workerLeaseMs: numberFlag(parsed.flags, "worker-lease"),
@@ -475,6 +487,39 @@ async function main(): Promise<void> {
         }
         throw new Error("Usage: codex-hardflow eval coverage [--run-id <runId>|--latest-evidence-run] [--include-test-runs] [--baseline-run-id <runId>]");
       }
+      case "diagnostics": {
+        const subcommand = args[0];
+        if (!validDiagnosticsCommand(subcommand)) {
+          throw new Error("Usage: codex-hardflow diagnostics <sdk-concurrency|sdk-prompt-width|sdk-bucket-difficulty|sdk-timeout-sweep|sdk-checkpoint-resume>");
+        }
+        const parsed = parseFlagArgs(args.slice(1));
+        printJson(
+          await runDiagnostics({
+            command: subcommand,
+            cwd,
+            task: stringFlag(parsed.flags, "task"),
+            buckets: parseCsv(stringFlag(parsed.flags, "buckets"), []),
+            concurrencyLevels: parseNumberCsv(stringFlag(parsed.flags, "concurrency-levels"), []),
+            repeats: numberFlag(parsed.flags, "repeats"),
+            maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
+            heartbeatIntervalMs: numberFlag(parsed.flags, "heartbeat-interval-ms"),
+            workerLeaseMs: numberFlag(parsed.flags, "worker-lease-ms"),
+            softTimeoutMs: numberFlag(parsed.flags, "soft-timeout-ms"),
+            hardTimeoutMs: numberFlag(parsed.flags, "hard-timeout-ms"),
+            globalBudgetMs: numberFlag(parsed.flags, "global-budget-ms"),
+            output: stringFlag(parsed.flags, "output"),
+            workdirRoot: stringFlag(parsed.flags, "workdir-root"),
+            dryRun: Object.hasOwn(parsed.flags, "dry-run") ? booleanFlag(parsed.flags, "dry-run") : undefined,
+            execute: booleanFlag(parsed.flags, "execute"),
+            realSdk: booleanFlag(parsed.flags, "real-sdk"),
+            randomize: booleanFlag(parsed.flags, "no-randomize") ? false : Object.hasOwn(parsed.flags, "randomize") ? booleanFlag(parsed.flags, "randomize") : undefined,
+            materializeDryRun: booleanFlag(parsed.flags, "materialize-dry-run"),
+            runIdPrefix: stringFlag(parsed.flags, "run-id-prefix"),
+            timeoutLevels: parseNumberCsv(stringFlag(parsed.flags, "timeout-levels"), [])
+          })
+        );
+        return;
+      }
       case "implement": {
         const task = args.join(" ");
         if (!task) throw new Error("Usage: codex-hardflow implement \"task...\"");
@@ -546,7 +591,7 @@ async function main(): Promise<void> {
             "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff --run-router \"task...\"",
-            "codex-hardflow research --run-id <runId> --strict-programmatic [--max-sources-per-worker <n>] \"task...\"",
+            "codex-hardflow research --run-id <runId> --strict-programmatic [--coverage-mode exhaustive|balanced|fast] [--max-sources-per-worker <n>] \"task...\"",
             "codex-hardflow research resume --run-id <runId>",
             "codex-hardflow research workers --run-id <runId>",
             "codex-hardflow research cancel --run-id <runId> --bucket <bucket>",
@@ -561,6 +606,11 @@ async function main(): Promise<void> {
             "codex-hardflow hooks status [--run-id <runId>]",
             "codex-hardflow hooks assert-active --run-id <runId>",
             "codex-hardflow eval coverage [--run-id <runId>|--latest-evidence-run] [--include-test-runs] [--baseline-run-id <runId>]",
+            "codex-hardflow diagnostics sdk-concurrency [--dry-run|--execute --real-sdk] [--output <path>]",
+            "codex-hardflow diagnostics sdk-prompt-width [--dry-run|--execute --real-sdk] [--output <path>]",
+            "codex-hardflow diagnostics sdk-bucket-difficulty [--dry-run|--execute --real-sdk] [--output <path>]",
+            "codex-hardflow diagnostics sdk-timeout-sweep [--dry-run|--execute --real-sdk] [--output <path>]",
+            "codex-hardflow diagnostics sdk-checkpoint-resume [--dry-run] [--output <path>]",
             "codex-hardflow implement \"task...\"",
             "codex-hardflow validate",
             "codex-hardflow probe-logprobs",

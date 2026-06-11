@@ -20,6 +20,8 @@ export type ResearchRunnerMode = "app_handoff" | "sdk_threads" | "strict_program
 export type ResearchEvidenceMode = "none" | "manual_backfilled" | "app_handoff" | "sdk_threads" | "mixed";
 export type ResearchReportStatus = "completed" | "degraded" | "failed";
 export type ResearchBucketStatus = "completed" | "searched_but_no_signal" | "failed" | "timeout" | "manual_fallback" | "manual_backfilled" | "context_exhausted";
+export type CoverageMode = "exhaustive" | "balanced" | "fast";
+export type BucketPriority = "critical" | "normal" | "low";
 export type ResearchAgentRunStatus = "completed" | "failed" | "timeout" | "spawn_failed" | "context_exhausted" | "manual_fallback";
 export type ResearchReportOwner = "parent" | "subagent";
 export type SubagentReportStatus = "completed" | "timeout" | "failed" | "searched_but_no_signal";
@@ -28,6 +30,29 @@ export type SubagentStatus = "spawned" | "not_spawned" | "unavailable" | "failed
 export type SubagentTriggerSource = "app_tool" | "sdk_threads" | "manual" | "none";
 export type SdkWorkerStatus = "pending" | "running" | "completed" | "degraded" | "failed" | "timeout" | "cancelled" | "needs_resume";
 export type SdkWorkerPoolStatus = "completed" | "degraded" | "failed";
+export type WorkerFailureCategory =
+  | "transient_network_error"
+  | "rate_limit"
+  | "sdk_timeout"
+  | "no_progress"
+  | "no_activity_progress"
+  | "no_artifact_progress"
+  | "no_semantic_progress"
+  | "hard_timeout"
+  | "invalid_json"
+  | "schema_validation_failed"
+  | "permission_error"
+  | "config_error"
+  | "private_path_violation"
+  | "cancelled"
+  | "unknown";
+export type ProgressCategory =
+  | "activity_progress"
+  | "artifact_progress"
+  | "semantic_progress"
+  | "no_activity_progress"
+  | "no_artifact_progress"
+  | "no_semantic_progress";
 
 export interface TaskClassification {
   researchHeavy: boolean;
@@ -53,14 +78,24 @@ export interface TaskClassification {
 export interface SourceMatrixEntry {
   bucket: SourceBucket | string;
   required: boolean;
+  status?: "required" | "possible" | "not_needed" | "excluded";
+  priority?: BucketPriority;
   reason: string;
   querySeeds: string[];
   searchedAtLeastOnce: boolean;
   searchedButNoSignal?: boolean;
+  excluded?: boolean;
+  excludedReason?: string;
+}
+
+export interface ExcludedBucket {
+  bucket: SourceBucket | string;
+  reason: string;
 }
 
 export interface SourceCoverageMatrix {
   task: string;
+  coverageMode?: CoverageMode;
   rawUserPrompt?: string;
   normalizedTask?: string;
   classificationInput?: string;
@@ -72,6 +107,9 @@ export interface SourceCoverageMatrix {
   classification: TaskClassification;
   entries: SourceMatrixEntry[];
   requiredBuckets: string[];
+  excludedBuckets?: ExcludedBucket[];
+  skippedPossibleBuckets?: string[];
+  coverageDebt?: string[];
   promptInjectionCaution: string;
 }
 
@@ -118,14 +156,56 @@ export interface SdkWorkerState {
   endedAt: string | null;
   lastHeartbeatAt: string;
   lastCheckpointAt: string;
+  lastActivityAt: string;
+  lastStreamEventAt: string | null;
+  lastToolActivityAt: string | null;
+  lastArtifactProgressAt: string;
+  lastSemanticProgressAt: string;
+  lastCheckpointNudgeAt: string | null;
   partialEvidenceCount: number;
+  activityEventCount: number;
+  streamEventCount: number;
+  toolActivityCount: number;
+  checkpointCount: number;
+  semanticProgressCount: number;
+  sourcesFoundCount: number;
+  queriesRunCount: number;
+  noSignalCount: number;
+  checkpointNudgeCount: number;
+  checkpointNudgeSuccessCount: number;
+  checkpointNudgeFailedCount: number;
   lastProgressAt: string;
+  progressCategory: ProgressCategory;
+  noActivityProgressCount: number;
+  noArtifactProgressCount: number;
+  noSemanticProgressCount: number;
+  lastProgressReason: string;
   currentStep: string;
   leaseExpiresAt: string;
   softTimeoutAt: string;
   hardTimeoutAt: string;
   resumeAvailable: boolean;
   failureReason: string;
+  failureCategory: WorkerFailureCategory;
+  retryable: boolean;
+  retryCount: number;
+  maxRetries: number;
+  lastErrorMessageSanitized: string;
+  lastRetryAt: string | null;
+  nextRetryAt: string | null;
+  retryBackoffMs: number;
+  attemptCount: number;
+  transientNetworkErrorCount: number;
+  rateLimitCount: number;
+  sdkTimeoutCount: number;
+  retrySuccess: boolean;
+  finalAttemptStatus: SdkWorkerStatus | "";
+  threadIds: string[];
+  resumedThreadIds: string[];
+  replacementThreadIds: string[];
+  timeLostToBackoffMs: number;
+  firstFailureAt: string | null;
+  lastFailureAt: string | null;
 }
 
 export interface SdkWorkerRun {
@@ -138,12 +218,51 @@ export interface SdkWorkerRun {
   endedAt: string;
   lastHeartbeatAt: string;
   lastCheckpointAt: string;
+  lastActivityAt: string;
+  lastStreamEventAt: string | null;
+  lastToolActivityAt: string | null;
+  lastArtifactProgressAt: string;
+  lastSemanticProgressAt: string;
+  lastCheckpointNudgeAt: string | null;
   partialEvidenceCount: number;
+  activityEventCount: number;
+  streamEventCount: number;
+  toolActivityCount: number;
+  checkpointCount: number;
+  semanticProgressCount: number;
+  sourcesFoundCount: number;
+  queriesRunCount: number;
+  noSignalCount: number;
+  checkpointNudgeCount: number;
+  checkpointNudgeSuccessCount: number;
+  checkpointNudgeFailedCount: number;
+  progressCategory: ProgressCategory;
+  noActivityProgressCount: number;
+  noArtifactProgressCount: number;
+  noSemanticProgressCount: number;
+  lastProgressReason: string;
   currentStep: string;
   sources_found_count: number;
   searched_but_no_signal: boolean;
   failure_reason: string;
   resumeAvailable: boolean;
+  failureCategory: WorkerFailureCategory;
+  retryable: boolean;
+  retryCount: number;
+  maxRetries: number;
+  lastErrorMessageSanitized: string;
+  attemptCount: number;
+  transientNetworkErrorCount: number;
+  rateLimitCount: number;
+  sdkTimeoutCount: number;
+  retrySuccess: boolean;
+  finalAttemptStatus: SdkWorkerStatus | "";
+  threadIds: string[];
+  resumedThreadIds: string[];
+  replacementThreadIds: string[];
+  timeLostToBackoffMs: number;
+  firstFailureAt: string | null;
+  lastFailureAt: string | null;
 }
 
 export interface ResearchReport {
@@ -188,7 +307,15 @@ export interface ResearchReport {
   router_trace_reuse_reason?: string;
   router_trace_stale_reason?: string;
   source_matrix: SourceCoverageMatrix;
+  coverageMode?: CoverageMode;
   required_buckets: string[];
+  requiredBucketCount?: number;
+  completedRequiredBucketCount?: number;
+  searchedButNoSignalCount?: number;
+  excludedBucketCount?: number;
+  excludedBuckets?: ExcludedBucket[];
+  skippedPossibleBuckets?: string[];
+  coverageDebt?: string[];
   bucket_statuses: Record<string, ResearchBucketStatus>;
   agent_runs: ResearchAgentRun[];
   researcher_reports: ResearcherReport[];

@@ -23,14 +23,18 @@ describe("source matrix", () => {
     expect(expanded.entries.find((entry) => entry.bucket === "vendor_forum")?.searchedAtLeastOnce).toBe(false);
   });
 
-  it("keeps generic research broad without requiring every possible bucket", () => {
+  it("defaults generic research to exhaustive required buckets", () => {
     const matrix = buildSourceCoverageMatrix("research current onboarding patterns for product teams", { routerOutput: broadResearchRouterOutput });
+    expect(matrix.coverageMode).toBe("exhaustive");
     expect(matrix.requiredBuckets).toContain("official_docs");
     expect(matrix.requiredBuckets).toContain("github");
     expect(matrix.requiredBuckets).toContain("community");
+    expect(matrix.requiredBuckets).toContain("academic");
+    expect(matrix.requiredBuckets).toContain("package_registry");
+    expect(matrix.requiredBuckets).toContain("security");
+    expect(matrix.requiredBuckets).toContain("blogs_engineering");
     expect(matrix.requiredBuckets).toContain("codex_default_discovery");
-    expect(matrix.requiredBuckets).not.toContain("security");
-    expect(matrix.requiredBuckets).not.toContain("package_registry");
+    expect(matrix.entries.every((entry) => entry.required)).toBe(true);
   });
 
   it("upgrades broad buckets for AI agent security and evaluation tasks", () => {
