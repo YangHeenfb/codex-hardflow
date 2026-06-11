@@ -10,7 +10,7 @@
 
 ## Current Objective
 
-Revise PR #1 with a small handoff-scaffold follow-up: fix stale state notes, add repo verification rules, add a GitHub PR template, and check scaffold files for hidden Unicode controls.
+Final PR #1 scaffold cleanup: improve the GitHub PR template, ensure scaffold Markdown is normal multi-line Markdown, and update handoff state/report files before merge review.
 
 ## Completed
 
@@ -26,33 +26,36 @@ Revise PR #1 with a small handoff-scaffold follow-up: fix stale state notes, add
 - Added local ignore rules for AI temporary, raw, and log artifacts.
 - Created draft PR #1 from `agent/2026-06-11-chatgpt-codex-handoff` to `main`.
 - Started a follow-up revision for PR #1 to tighten workflow guidance and stale state.
+- Started the final PR #1 scaffold cleanup.
 
 ## Changed Recently
 
-- Updated `AGENTS.md` with repository verification, dirty working tree, and push policies.
-- Updated `ai/context/CURRENT_STATE.md` to reflect active PR #1 work.
-- Updated `ai/context/SCOUT.md` to remove stale branch and GitHub template observations.
-- Added `.github/pull_request_template.md` for handoff PRs.
+- Expanded `.github/pull_request_template.md` with plan/report/state paths, verification results, a safety checklist, and the next ChatGPT question.
+- Updated `ai/plans/TEMPLATE.md` with path fields, verification commands, a safety checklist, and the next ChatGPT question.
+- Updated `ai/context/CURRENT_STATE.md` for the final PR #1 cleanup.
+- Updated `ai/reports/CODEX_REPORT.md` with a final cleanup follow-up entry.
 
 ## Verification Status
 
-Follow-up validation completed:
+Final scaffold-cleanup validation:
 
 - `git diff --check` passed.
-- `git diff --cached --check` passed before committing the original checkpoint.
+- `git diff --cached --check` passed for staged scaffold cleanup files.
 - `git status --short` reviewed.
+- `wc -l` confirmed scaffold Markdown files are normal multi-line documents.
 - No `.env` files or secret-named files are included in this scaffold change.
 - Hidden/bidirectional Unicode control character scan found no matches in scaffold files.
 - Product source/test paths currently shown in git status were pre-existing and were not modified for this scaffold task.
 - Review branch `agent/2026-06-11-chatgpt-codex-handoff` is active.
-- PR #1 is open as a draft PR.
+- PR #1 is still the active draft PR.
+- Product code was not verified for this scaffold-only cleanup.
 
 ## Open Issues
 
 - Pre-existing uncommitted product source/test changes were present before this task and are not part of the handoff scaffold.
 - No GitHub Actions workflow is visible locally, so CI expectations are currently inferred from `package.json` and docs.
-- Only handoff-related files should be staged for this follow-up commit.
+- Only handoff-related files should be staged for this final cleanup commit.
 
 ## Next Action
 
-After this follow-up is pushed, ask ChatGPT to review PR #1 for clarity, scope, safety, and missing project-specific workflow rules.
+Ask ChatGPT to review PR #1, then the user decides whether to merge.

@@ -4,6 +4,18 @@
 
 Describe the user-visible goal and the desired repository state after Codex finishes.
 
+## Plan Path
+
+Record the path where this plan is saved, for example `ai/plans/PLAN.md`.
+
+## Codex Report Path
+
+Use `ai/reports/CODEX_REPORT.md` unless the task explicitly defines another report path.
+
+## Current State Path
+
+Use `ai/context/CURRENT_STATE.md` as the current task state source of truth.
+
 ## Non-Goals
 
 List behavior, files, systems, or cleanup work that Codex must not change.
@@ -35,6 +47,15 @@ npm test
 
 If a command is intentionally skipped, Codex must record why in the final report.
 
+## Safety Checklist
+
+- No direct push to `main`.
+- No secrets, tokens, `.env` contents, raw traces, huge logs, or sensitive personal data.
+- Product source/test changes are intentionally included, or confirmed not included.
+- Unrelated dirty working tree changes are not staged.
+- `ai/context/CURRENT_STATE.md` is updated before pushing or review handoff.
+- `ai/reports/CODEX_REPORT.md` is updated before pushing or review handoff.
+
 ## Risk Areas
 
 List files, behaviors, compatibility constraints, data handling concerns, or testing gaps that need extra care.
@@ -62,3 +83,7 @@ Codex must update `ai/reports/CODEX_REPORT.md` with:
 - Issues found
 - Remaining risks
 - Suggested next ChatGPT review question
+
+## Next ChatGPT Question
+
+Ask ChatGPT what it should decide next, for example whether the PR is ready to merge or needs another focused follow-up.

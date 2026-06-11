@@ -97,3 +97,39 @@ Added documentation scaffolding under `ai/` so ChatGPT can plan and review throu
 ## Suggested Next ChatGPT Review Question
 
 Does the new `ai/` scaffold capture enough state for ChatGPT to review future Codex milestones from GitHub without relying on chat memory?
+
+## Follow-Up Report: Final PR Template Cleanup
+
+### Task
+
+Finalize PR #1 handoff-scaffold cleanup before merge.
+
+### Files Changed
+
+- `.github/pull_request_template.md`
+- `ai/plans/TEMPLATE.md`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Validation Commands And Results
+
+- `git diff --check`: passed.
+- `git diff --cached --check`: passed for staged scaffold cleanup files.
+- `git status --short`: reviewed; product source/test changes remain unstaged.
+- `wc -l .github/pull_request_template.md AGENTS.md ai/README.md ai/context/CURRENT_STATE.md ai/context/SCOUT.md ai/plans/TEMPLATE.md ai/reports/CODEX_REPORT.md ai/decisions/TEMPLATE.md`: reviewed; scaffold Markdown files are multi-line documents.
+- Hidden/bidirectional Unicode control character scan: no matches found.
+
+Product source/test verification was not run because this cleanup only changes handoff scaffold Markdown.
+
+### Safety Checklist
+
+- No direct push to `main`.
+- No secrets, tokens, `.env` contents, raw traces, huge logs, or sensitive personal data.
+- Product source/test files were not modified, staged, or committed.
+- Unrelated dirty working tree changes were not staged.
+- `ai/context/CURRENT_STATE.md` was updated.
+- `ai/reports/CODEX_REPORT.md` was updated.
+
+### Next ChatGPT Question
+
+Please review this PR using the plan, Codex report, current state, verification result, and diff. Is this ready to merge, or should Codex do another focused follow-up?
