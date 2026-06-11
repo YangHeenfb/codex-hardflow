@@ -6,7 +6,7 @@ Create a lightweight repository-level ChatGPT-Codex GitHub handoff workflow scaf
 
 ## Summary
 
-Added documentation scaffolding under `ai/` so ChatGPT can plan and review through GitHub while Codex records scouting, execution state, and milestone reports in durable repo files. Added root `AGENTS.md` protocol guidance and ignore rules for local AI temporary/raw/log artifacts.
+Added documentation scaffolding under `ai/` so ChatGPT can plan and review through GitHub while Codex records scouting, execution state, and milestone reports in durable repo files. Added root `AGENTS.md` protocol guidance, ignore rules for local AI temporary/raw/log artifacts, and a follow-up PR template/verification policy update.
 
 ## Files Changed
 
@@ -18,6 +18,7 @@ Added documentation scaffolding under `ai/` so ChatGPT can plan and review throu
 - `ai/decisions/TEMPLATE.md`
 - `AGENTS.md`
 - `.gitignore`
+- `.github/pull_request_template.md`
 
 ## Commands Run
 
@@ -56,6 +57,11 @@ Added documentation scaffolding under `ai/` so ChatGPT can plan and review throu
 - `git add AGENTS.md ai .gitignore`
 - `git diff --cached --name-only`
 - `git diff --cached --stat`
+- `gh pr view 1 --json number,url,isDraft,state,title,baseRefName,headRefName`
+- `git diff --check -- AGENTS.md ai .github/pull_request_template.md`
+- `perl -CS -ne 'print "$ARGV:$.:$_" if /[\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}\\x{200B}\\x{200C}\\x{200D}\\x{FEFF}]/' AGENTS.md ai/README.md ai/context/CURRENT_STATE.md ai/context/SCOUT.md ai/decisions/TEMPLATE.md ai/plans/TEMPLATE.md ai/reports/CODEX_REPORT.md .github/pull_request_template.md`
+- `git add AGENTS.md ai/context/CURRENT_STATE.md ai/context/SCOUT.md ai/reports/CODEX_REPORT.md .github/pull_request_template.md`
+- `git diff --cached --check`
 
 ## Verification Result
 
@@ -64,9 +70,12 @@ Added documentation scaffolding under `ai/` so ChatGPT can plan and review throu
 - `git status --short --untracked-files=all` was reviewed. The scaffold files are untracked until staged.
 - `git diff --cached --name-only` returned no files, confirming nothing is staged.
 - After explicit staging, `git diff --cached --name-only` showed only `.gitignore`, `AGENTS.md`, and `ai/**`.
+- Follow-up staged paths were reviewed and limited to `.github/pull_request_template.md`, `AGENTS.md`, and `ai/**`.
+- `git diff --cached --check` passed for the follow-up commit after fixing PR template placeholder whitespace.
 - No product source code was modified for this scaffold task.
 - No `.env` files or secret-named files are staged or included in this scaffold change.
 - No key material patterns were found in the scaffold files by the stricter local scan.
+- Hidden/bidirectional Unicode control character scan returned no matches in scaffold files, so no normalization edits were needed.
 - GitHub CLI is installed and authenticated.
 - Review branch `agent/2026-06-11-chatgpt-codex-handoff` was created.
 
@@ -77,8 +86,8 @@ Added documentation scaffolding under `ai/` so ChatGPT can plan and review throu
 ## Issues Found
 
 - The working tree had pre-existing uncommitted product source/test changes before this task.
-- No `.github/` directory was visible locally, so GitHub Actions and PR conventions could not be confirmed from repository files.
-- Only handoff-related files should be staged for the checkpoint commit.
+- No `.github/` directory was visible during initial inspection; this follow-up adds a lightweight PR template, but no GitHub Actions workflow is present locally.
+- Only handoff-related files should be staged for follow-up commits.
 
 ## Remaining Risks
 

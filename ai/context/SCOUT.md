@@ -6,6 +6,7 @@
 
 ## Relevant Repo Structure
 
+- `.github/pull_request_template.md`: lightweight PR template for ChatGPT-Codex handoff reviews.
 - `bin/codex-hardflow`: package CLI binary entrypoint.
 - `src/`: TypeScript source for the codex-hardflow CLI, hooks, routing, orchestration, validation, diagnostics, and related utilities.
 - `src/templates/`: prompt and agent templates used by the CLI.
@@ -44,13 +45,14 @@
 ## GitHub And CI Observations
 
 - Remote: `origin` points to `https://github.com/YangHeenfb/codex-hardflow.git`.
-- No local `.github/` directory was present during inspection.
-- No GitHub Actions workflow, PR template, or issue template was visible locally.
+- Draft PR #1 exists for the handoff scaffold branch.
+- This scaffold adds `.github/pull_request_template.md`.
+- No GitHub Actions workflow or issue template was visible locally.
 - CI expectations should be treated as unknown unless confirmed from GitHub.
 
 ## Risks And Unknowns
 
 - The working tree already had uncommitted product source/test changes before this scaffold task; keep this scaffold isolated from those changes.
-- Current branch is `main`; workflow docs should prefer creating a review branch before committing or pushing.
+- Current branch is `agent/2026-06-11-chatgpt-codex-handoff`; keep follow-up commits on this PR branch.
 - No lint command is declared; do not invent one in task plans.
 - `npm run verify` may be affected by pre-existing unrelated changes, so scaffold validation should focus on changed paths unless broader verification is explicitly requested.

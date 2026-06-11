@@ -10,7 +10,7 @@
 
 ## Current Objective
 
-Pilot a repository-level ChatGPT-Codex GitHub handoff workflow by adding documentation scaffolding under `ai/`, root agent guidance, and safe local ignore rules.
+Revise PR #1 with a small handoff-scaffold follow-up: fix stale state notes, add repo verification rules, add a GitHub PR template, and check scaffold files for hidden Unicode controls.
 
 ## Completed
 
@@ -24,38 +24,35 @@ Pilot a repository-level ChatGPT-Codex GitHub handoff workflow by adding documen
 - Added the `ai/` handoff documentation scaffold for this pilot.
 - Added root `AGENTS.md` handoff rules.
 - Added local ignore rules for AI temporary, raw, and log artifacts.
+- Created draft PR #1 from `agent/2026-06-11-chatgpt-codex-handoff` to `main`.
+- Started a follow-up revision for PR #1 to tighten workflow guidance and stale state.
 
 ## Changed Recently
 
-- Created `ai/README.md`.
-- Created `ai/context/CURRENT_STATE.md`.
-- Created `ai/context/SCOUT.md`.
-- Created `ai/plans/TEMPLATE.md`.
-- Created `ai/reports/CODEX_REPORT.md`.
-- Created `ai/decisions/TEMPLATE.md`.
-- Created root `AGENTS.md`.
-- Updated `.gitignore`.
+- Updated `AGENTS.md` with repository verification, dirty working tree, and push policies.
+- Updated `ai/context/CURRENT_STATE.md` to reflect active PR #1 work.
+- Updated `ai/context/SCOUT.md` to remove stale branch and GitHub template observations.
+- Added `.github/pull_request_template.md` for handoff PRs.
 
 ## Verification Status
 
-Safe scaffold validation completed:
+Follow-up validation completed:
 
 - `git diff --check` passed.
-- `git diff --stat` reviewed.
-- `git status --short --untracked-files=all` reviewed.
-- Before checkpoint staging, no files were staged.
-- Staged paths were reviewed and limited to handoff-related files.
+- `git diff --cached --check` passed before committing the original checkpoint.
+- `git status --short` reviewed.
 - No `.env` files or secret-named files are included in this scaffold change.
+- Hidden/bidirectional Unicode control character scan found no matches in scaffold files.
 - Product source/test paths currently shown in git status were pre-existing and were not modified for this scaffold task.
 - Review branch `agent/2026-06-11-chatgpt-codex-handoff` is active.
-- GitHub CLI authentication is available for publishing the draft PR.
+- PR #1 is open as a draft PR.
 
 ## Open Issues
 
 - Pre-existing uncommitted product source/test changes were present before this task and are not part of the handoff scaffold.
-- No GitHub Actions or PR templates were visible locally, so CI expectations are currently inferred from `package.json` and docs.
-- Only the handoff-related files should be staged for the checkpoint commit.
+- No GitHub Actions workflow is visible locally, so CI expectations are currently inferred from `package.json` and docs.
+- Only handoff-related files should be staged for this follow-up commit.
 
 ## Next Action
 
-Commit only the handoff scaffold files, push the review branch, and open a draft PR.
+After this follow-up is pushed, ask ChatGPT to review PR #1 for clarity, scope, safety, and missing project-specific workflow rules.
