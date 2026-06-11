@@ -21,3 +21,10 @@ hidden-tests/
 *.private.json
 *.hidden.json
 *.tgz
+
+# AI handoff local artifacts
+ai/tmp/
+ai/raw/
+ai/logs/
+.agent-traces/
+.codex-log/
