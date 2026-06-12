@@ -9,7 +9,7 @@ import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
 import { addManualSourceToReport, buildResearchReport, runResearch } from "../src/researchOrchestrator.js";
 import { currentResearchReportPath, legacyResearchReportPath, repoHash, researchRunReportPath } from "../src/paths.js";
-import { broadResearchRouterOutput } from "./routerFixtures.js";
+import { broadResearchRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
 import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
 
 function tempRepo(): string {
@@ -58,6 +58,91 @@ describe("hook marker Stop gate", () => {
     expect(marker.requiresSourceMatrix).toBe(false);
     expect(marker.runId).toBe("run-turn-schema");
     expect(marker.maxBlocks).toBe(2);
+    expect(marker.routeStatus).toBe("router_required");
+    expect(marker.routerBlockCount).toBe(0);
+  });
+
+  it("blocks router_required UserPromptSubmit markers once when router_trace is missing", () => {
+    const cwd = tempRepo();
+    userPromptSubmit(
+      {
+        cwd,
+        prompt: "research current AI coding agent hidden validation sandbox evaluation framework",
+        turnId: "turn-router-required"
+      },
+      process.cwd()
+    );
+
+    const first = stopValidationGate({ cwd, turnId: "turn-router-required" });
+    expect(first.decision).toBe("block");
+    expect(String(first.reason)).toContain("router_trace");
+
+    const second = stopValidationGate({ cwd, turnId: "turn-router-required" });
+    expect(second.decision).toBe("allow");
+    expect(second.hardflowStatus).toBe("router_required_missing_after_one_block");
+  });
+
+  it("allows direct_answer routes without research report", () => {
+    const cwd = tempRepo();
+    const prompt = "translate hello to Chinese";
+    const marker = createHookMarker({
+      cwd,
+      prompt,
+      sourceRoot: process.cwd(),
+      taskType: "router-preflight",
+      requiresSourceMatrix: false,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: true,
+      routeStatus: "router_required",
+      input: { turnId: "turn-direct-answer" }
+    });
+    const direct = routerOutputForBuckets([], {
+      route: "direct_answer",
+      workflowPattern: "direct",
+      researchProfile: "none",
+      requiresSourceMatrix: false,
+      reasons: ["Direct translation."],
+      risks: []
+    });
+    writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId }, direct, "llm", undefined, marker.turnId));
+
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
+    expect(result.decision).toBe("allow");
+    expect(String(result.notice)).toContain("direct_answer");
+  });
+
+  it("blocks automatic research routes when report is app_handoff instead of strict_programmatic", () => {
+    const cwd = tempRepo();
+    const prompt = "research current AI coding agent hidden validation approaches";
+    const marker = createHookMarker({
+      cwd,
+      prompt,
+      sourceRoot: process.cwd(),
+      taskType: "router-preflight",
+      requiresSourceMatrix: false,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: true,
+      routeStatus: "router_required",
+      input: { turnId: "turn-auto-research-app-handoff" }
+    });
+    const report = buildResearchReport(prompt, [], "not_configured", {
+      runId: marker.runId,
+      turnId: marker.turnId,
+      routerOutput: broadResearchRouterOutput,
+      runnerMode: "app_handoff",
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: true
+    }) as unknown as Record<string, unknown>;
+    writeReport(cwd, marker, prompt);
+    writeFileSync(researchRunReportPath(cwd, marker.runId), `${JSON.stringify({ ...report, generatedAt: new Date(Date.parse(marker.createdAt) + 1_000).toISOString() }, null, 2)}\n`);
+
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
+    expect(result.decision).toBe("block");
+    expect(String(result.reason)).toContain("requires strict_programmatic");
   });
 
   it("does not let a stale research_report satisfy the current marker", () => {
@@ -234,19 +319,19 @@ describe("hook marker Stop gate", () => {
     expect(stopValidationGate({ cwd }).decision).toBe("allow");
   });
 
-  it("allows hardflow maintenance markers without business executor_manifest", () => {
+  it("allows explicit hardflow maintenance markers without business executor_manifest", () => {
     const cwd = tempRepo();
-    const result = userPromptSubmit(
-      {
-        cwd,
-        prompt: "修复 codex-hardflow Stop hook PATH install-global",
-        turnId: "turn-maintenance",
-        sessionId: "thread-maintenance"
-      },
-      process.cwd()
-    );
+    createHookMarker({
+      cwd,
+      prompt: "修复 codex-hardflow Stop hook PATH install-global",
+      sourceRoot: process.cwd(),
+      taskType: "hardflow-maintenance",
+      requiresSourceMatrix: false,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      input: { turnId: "turn-maintenance" }
+    });
 
-    expect(result.decision).toBe("allow");
     expect(stopValidationGate({ cwd, turnId: "turn-maintenance" }).decision).toBe("allow");
   });
 });

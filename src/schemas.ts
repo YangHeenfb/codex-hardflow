@@ -22,6 +22,8 @@ export type ResearchReportStatus = "completed" | "degraded" | "failed";
 export type ResearchBucketStatus = "completed" | "searched_but_no_signal" | "failed" | "timeout" | "manual_fallback" | "manual_backfilled" | "context_exhausted";
 export type CoverageMode = "exhaustive" | "balanced" | "fast";
 export type BucketPriority = "critical" | "normal" | "low";
+export type ParallelPolicy = "all_required" | "fixed" | "adaptive" | "wave";
+export type RouteStatus = "router_required" | "router_ready" | "router_failed" | "not_required";
 export type ResearchAgentRunStatus = "completed" | "failed" | "timeout" | "spawn_failed" | "context_exhausted" | "manual_fallback";
 export type ResearchReportOwner = "parent" | "subagent";
 export type SubagentReportStatus = "completed" | "timeout" | "failed" | "searched_but_no_signal";
@@ -308,6 +310,7 @@ export interface ResearchReport {
   router_trace_stale_reason?: string;
   source_matrix: SourceCoverageMatrix;
   coverageMode?: CoverageMode;
+  parallelPolicy?: ParallelPolicy;
   required_buckets: string[];
   requiredBucketCount?: number;
   completedRequiredBucketCount?: number;
@@ -332,6 +335,29 @@ export interface ResearchReport {
   confidence_summary: string;
   citations_or_refs: string[];
   prompt_injection_notes: string[];
+}
+
+export type ResearchRequestRequestedBy = "planner" | "executor" | "validator" | "reviewer" | "stop_hook";
+export type ResearchRequestStage = "planning" | "execution" | "validation" | "review" | "repair";
+export type ResearchRequestUrgency = "blocking" | "non_blocking";
+export type ResearchRequestStatus = "pending" | "running" | "resolved" | "failed" | "cancelled";
+
+export interface ResearchRequest {
+  requestId: string;
+  runId: string;
+  createdAt: string;
+  requestedBy: ResearchRequestRequestedBy;
+  stage: ResearchRequestStage;
+  reason: string;
+  question: string;
+  requiredBuckets: string[];
+  urgency: ResearchRequestUrgency;
+  contextRefs: string[];
+  relatedFiles: string[];
+  status: ResearchRequestStatus;
+  linkedResearchRunId: string | null;
+  failureReason?: string;
+  resolvedAt?: string;
 }
 
 export interface SubagentReport {
@@ -372,6 +398,8 @@ export interface ExecutorManifest {
   };
   risk_areas: string[];
   known_limitations: string[];
+  externalResearchNeeded?: boolean;
+  unresolvedResearchRequests?: string[];
 }
 
 export interface ValidationCategory {

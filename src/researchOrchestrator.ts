@@ -41,7 +41,8 @@ import type {
   SubagentReportStatus,
   SourceCoverageMatrix,
   TriggerSource,
-  CoverageMode
+  CoverageMode,
+  ParallelPolicy
 } from "./schemas.js";
 import { currentResearchReportPath, researchRunMetadataPath, researchRunReportPath, researchRunRouterTracePath, researchRunSubagentsDir, researchSubagentReportPath } from "./paths.js";
 import { createHookMarker, hashText, resolveLatestActiveMarker } from "./hookState.js";
@@ -88,6 +89,7 @@ export interface BuildResearchReportOptions {
   sdkWorkerRuns?: SdkWorkerRun[];
   appSubagentStatus?: ResearchReport["app_subagent_status"];
   coverageMode?: CoverageMode;
+  parallelPolicy?: ParallelPolicy;
 }
 
 export interface RunResearchOptions extends BuildResearchReportOptions {
@@ -118,6 +120,7 @@ export interface RunResearchOptions extends BuildResearchReportOptions {
   maxCheckpointNudges?: number;
   globalBudgetMs?: number;
   coverageMode?: CoverageMode;
+  parallelPolicy?: ParallelPolicy;
   sdkPromptRunner?: (prompt: string, cwd: string, bucket: string) => Promise<string>;
   sdkStepRunner?: SdkResearchStepRunner;
   defaultDiscoveryBuckets?: string[];
@@ -408,8 +411,8 @@ export function buildResearchReport(
     sdk_worker_runs: options.sdkWorkerRuns,
     app_subagent_status: options.appSubagentStatus ?? (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic" ? "not_applicable" : runnerMode === "app_handoff" ? "not_spawned" : undefined),
     app_handoff_required: options.appHandoffRequired ?? runnerMode === "app_handoff",
-    sdk_threads_started: options.sdkThreadsStarted ?? runnerMode === "sdk_threads",
-    sdk_threads_allowed: options.sdkThreadsAllowed ?? runnerMode === "sdk_threads",
+    sdk_threads_started: options.sdkThreadsStarted ?? (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic"),
+    sdk_threads_allowed: options.sdkThreadsAllowed ?? (runnerMode === "sdk_threads" || runnerMode === "strict_programmatic"),
     subagent_instruction_injected: options.subagentInstructionInjected ?? runnerMode === "app_handoff",
     manual_backfill_required: options.manualBackfillRequired ?? manualBackfillRequiredFor(runnerMode, status, searchedSources),
     manual_fallback_reason: runnerMode === "manual_fallback" || runnerMode === "mixed" ? manualFallbackReason : undefined,
@@ -422,6 +425,7 @@ export function buildResearchReport(
     router_trace_stale_reason: options.routerTraceStaleReason,
     source_matrix: matrix,
     coverageMode: matrix.coverageMode,
+    parallelPolicy: options.parallelPolicy,
     required_buckets: requiredBuckets,
     requiredBucketCount: requiredBuckets.length,
     completedRequiredBucketCount: requiredBuckets.filter((bucket) => completedRequiredStatus(bucketStatuses[bucket])).length,
@@ -857,8 +861,8 @@ function writeParentResearchReport(cwd: string, report: ResearchReport, updateCu
 export async function runResearch(task: string, cwd: string, options: RunResearchOptions = {}): Promise<ResearchReport> {
   const sourceRoot = options.sourceRoot ?? cwd;
   const parts = taskParts(task, options);
-  const runnerMode: ResearchRunnerMode = options.strictProgrammatic ? "strict_programmatic" : options.executeSdkResearch ? "sdk_threads" : options.runnerMode ?? "app_handoff";
-  if (runnerMode === "mixed") throw new Error("runnerMode=mixed is a report state created after backfill; use app_handoff, manual_fallback, or sdk_threads.");
+  const requestedRunnerMode: ResearchRunnerMode | undefined = options.strictProgrammatic ? "strict_programmatic" : options.executeSdkResearch ? "sdk_threads" : options.runnerMode;
+  if (requestedRunnerMode === "mixed") throw new Error("runnerMode=mixed is a report state created after backfill; use app_handoff, manual_fallback, or sdk_threads.");
   const triggerSource = options.triggerSource ?? "cli_command";
   const programmaticTrigger = options.programmaticTrigger ?? true;
   const marker = createHookMarker({
@@ -977,12 +981,19 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
   }
 
+  const runnerMode: ResearchRunnerMode = requestedRunnerMode ?? (routerOutput.route === "research" ? "strict_programmatic" : "app_handoff");
+  const effectiveStrictProgrammatic = options.strictProgrammatic === true || runnerMode === "strict_programmatic";
+  const effectiveCoverageMode: CoverageMode | undefined =
+    options.coverageMode ?? (runnerMode === "strict_programmatic" && routerOutput.route === "research" ? "exhaustive" : undefined);
+  const effectiveParallelPolicy: ParallelPolicy | undefined =
+    options.parallelPolicy ?? (runnerMode === "strict_programmatic" && effectiveCoverageMode === "exhaustive" ? "all_required" : undefined);
+
   const coveragePlan = writeCoveragePlan(
     cwd,
     buildCoveragePlan(routerOutput, parts.rawUserPrompt, {
       runId: marker.runId,
       normalizedTask: parts.normalizedTask,
-      coverageMode: options.coverageMode
+      coverageMode: effectiveCoverageMode
     })
   );
 
@@ -993,7 +1004,9 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     routerTraceStaleReason,
     triggerSource,
     programmaticTrigger,
-    strictProgrammatic: options.strictProgrammatic
+    strictProgrammatic: effectiveStrictProgrammatic,
+    coverageMode: effectiveCoverageMode,
+    parallelPolicy: effectiveParallelPolicy
   };
 
   const strictRequiredBuckets = coveragePlan.requiredBuckets.length > 0 ? coveragePlan.requiredBuckets : coveragePlan.sourceBuckets.filter((bucket) => bucket.required).map((bucket) => bucket.bucket);
@@ -1122,7 +1135,14 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     return writeParentResearchReport(cwd, report, true);
   }
 
-  let matrix = sourceMatrixForTask(task, { ...options, routerOutput, runId: marker.runId, rawUserPrompt: parts.rawUserPrompt, normalizedTask: parts.normalizedTask });
+  let matrix = sourceMatrixForTask(task, {
+    ...options,
+    routerOutput,
+    runId: marker.runId,
+    rawUserPrompt: parts.rawUserPrompt,
+    normalizedTask: parts.normalizedTask,
+    coverageMode: effectiveCoverageMode
+  });
   if (options.defaultDiscoveryBuckets?.length) {
     matrix = applyDefaultDiscoveryFindings(matrix, options.defaultDiscoveryBuckets);
   }
@@ -1159,7 +1179,7 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
   }
   const requiredBuckets = requiredEntries.map((entry) => String(entry.bucket));
   const defaultMaxConcurrentBuckets =
-    runnerMode === "strict_programmatic" && coveragePlan.coverageMode === "exhaustive" ? Math.max(1, requiredBuckets.length) : DEFAULT_SDK_MAX_CONCURRENT_BUCKETS;
+    runnerMode === "strict_programmatic" && effectiveParallelPolicy === "all_required" ? Math.max(1, requiredBuckets.length) : DEFAULT_SDK_MAX_CONCURRENT_BUCKETS;
   const pool = await runSdkResearchPool({
     runId: marker.runId,
     rawUserPrompt: parts.rawUserPrompt,

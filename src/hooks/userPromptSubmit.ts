@@ -14,34 +14,6 @@ function allowOutput(additionalContext = ""): Record<string, unknown> {
   };
 }
 
-function shouldInjectExplicitSubagentSpawn(prompt: string): boolean {
-  const text = prompt.toLowerCase();
-  const simpleDirect = /(^|\s)(translate|rewrite|grammar|hello|hi)\b/.test(text) || /翻译|润色|改写|闲聊/.test(prompt);
-  const localOnlyPlan = /不要改代码|先不要改代码|只给.*计划|implementation plan only|plan only/.test(prompt) && !/类似|竞品|替代|对比|调研|current|latest|similar|competitor|alternative|research/.test(text);
-  if (simpleDirect || localOnlyPlan) return false;
-  return /research|current|latest|compare|similar|competitor|alternative|architecture|framework|troubleshoot|security|evaluation|multi[-\s]?agent|products?|projects?/.test(text)
-    || /调研|当前|最新|对比|比较|类似|竞品|替代|方案|架构|框架|排查|安全|评测|产品|项目|吸收|改进/.test(prompt);
-}
-
-function explicitSubagentSpawnInstruction(markerRunId: string): string {
-  return [
-    "This task requires explicit source-specific subagent spawning if the App subagent capability is available.",
-    "Spawn the relevant source-specific researcher subagents:",
-    "local_repo_researcher when local repo/current project is relevant;",
-    "competitor_researcher when similar products/projects/alternatives are relevant;",
-    "official_docs_researcher;",
-    "github_researcher;",
-    "community_researcher;",
-    "academic_researcher;",
-    "package_security_researcher;",
-    "codex_default_researcher.",
-    "If Codex decides not to spawn subagents, it must record subagent_status = \"not_spawned\" and subagent_skip_reason = \"...\" in research_report.",
-    "Manual/App search may be used only if sources are backfilled into the report.",
-    "Do not say subagents are unavailable merely because the user did not explicitly ask; this hardflow injected context is the explicit request.",
-    `Subagents must not write the parent report or current report. They may write only .agent/reports/runs/${markerRunId}/subagents/<agent>-<bucket>.json or .agent/reports/runs/${markerRunId}/subagents/<agent>-<bucket>.router_trace.json, or output JSON for the parent to merge.`
-  ].join(" ");
-}
-
 export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot = process.cwd()): Record<string, unknown> {
   const prompt = String(input.prompt ?? input.user_prompt ?? input.message ?? "");
   if (!prompt.trim()) return allowOutput();
@@ -57,27 +29,30 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
     requiresValidation: false,
     triggerSource: "hook_user_prompt_submit",
     programmaticTrigger: true,
+    routeStatus: "router_required",
     input
   });
 
   const absoluteCommand = absoluteCommandFor(sourceRoot);
   const agentNames = DEFAULT_AVAILABLE_AGENTS.map((agent) => agent.name).join(", ");
   const routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
-  const spawnInstruction = shouldInjectExplicitSubagentSpawn(prompt) ? explicitSubagentSpawnInstruction(marker.runId) : "";
+  const routeCommand = `${absoluteCommand} route --run-id ${JSON.stringify(marker.runId)} --write-trace --raw-user-prompt ${JSON.stringify(prompt)} ${JSON.stringify(prompt)}`;
+  const strictResearchCommand = `${absoluteCommand} research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required --run-id ${JSON.stringify(marker.runId)} --raw-user-prompt ${JSON.stringify(prompt)} ${JSON.stringify(prompt)}`;
 
   const additionalContext = [
-      `codex-hardflow router preflight is required for this turn. Hook command fallback: ${absoluteCommand}. Prefer this absolute command even if shell PATH can find codex-hardflow; app PATH may differ.`,
-      `Hardflow marker: turnId=${marker.turnId}, runId=${marker.runId}, promptHash=${marker.promptHash}, createdAt=${marker.createdAt}, expiresAt=${marker.expiresAt}. Stop gate must use marker.runId plus router_trace/routerOutput, not keyword reclassification.`,
-      `First create or verify router_trace at ${routerTracePath}. In Codex App hook mode, do not synchronously launch Codex SDK router threads from the hook; perform the LLM Router preflight in this turn and write schema JSON.`,
-      "Router must infer user intent semantically, not by keyword matching. If router fails, set route=router_failed and do not silently use keyword fallback.",
-      "Router failed behavior: do not claim hardflow classification; if the task seems to require code changes, ask for confirmation before modifying files; if the user wants hardflow, ask them to rerun or explicitly request hardflow after fixing router.",
-      `Available agents for routing: ${agentNames}. Use agent descriptions and required source buckets to decide requiredAgents.`,
-      "If routerOutput requiresSourceMatrix, App interactive research should use app_handoff by default. Do not synchronously launch SDK researcher threads unless explicitly requested with --runner sdk_threads or --execute-sdk-research.",
-      `Safe App handoff command example after router route=research: ${absoluteCommand} research --runner app_handoff --run-id ${JSON.stringify(marker.runId)} --raw-user-prompt ${JSON.stringify(prompt)} ${JSON.stringify(prompt)}.`,
-      spawnInstruction,
-      `Backfill App/manual/subagent results using official CLI commands with this runId: codex-hardflow report add-source --run-id ${marker.runId}, codex-hardflow report add-subagent-report --run-id ${marker.runId}, codex-hardflow report merge-subagents --run-id ${marker.runId}, and codex-hardflow report finalize-manual --run-id ${marker.runId}.`,
-      "For normal App runs, use the formal codex-hardflow CLI or absolute command. Do not use inline internal TypeScript imports or development TypeScript entrypoints to backfill research_report; those are for explicit maintainer work only.",
-      "If routerOutput requiresExecutorManifest, write .agent/manifests/executor_manifest.json before stopping. If routerOutput requiresValidation or requiresFinalHoldout, keep validator feedback sanitized and run the required validation/final-holdout gate before claiming completion."
+      `codex-hardflow router preflight is required for every non-empty user prompt in this turn. Hook command fallback: ${absoluteCommand}. Prefer this absolute command even if shell PATH can find codex-hardflow; app PATH may differ.`,
+      `Hardflow marker: turnId=${marker.turnId}, runId=${marker.runId}, promptHash=${marker.promptHash}, createdAt=${marker.createdAt}, expiresAt=${marker.expiresAt}, routeStatus=router_required. Stop gate must use marker.runId plus router_trace/routerOutput, not keyword reclassification.`,
+      `First create or verify router_trace at ${routerTracePath}. If the hook environment cannot safely call the structured LLM router directly, run exactly: ${routeCommand}.`,
+      "Router must infer user intent semantically, not by keyword matching. If structured output is unavailable, keep routeStatus=router_required until codex-hardflow route writes router_trace; do not use keyword fallback.",
+      "If routerOutput.route=direct_answer, do not create a research run, do not require Source Coverage Matrix, and do not claim hardflow executed beyond router preflight.",
+      `If routerOutput.route=research, immediately run strict programmatic exhaustive research with all required buckets in parallel: ${strictResearchCommand}.`,
+      "Research route rules: use strict_programmatic/sdk_threads only; no App subagents, no manual fallback, no AGENTS.md/skill fallback, no silent downgrade. If strict_programmatic fails, write status=failed and failure_reason.",
+      "Implementation route rules: start from local_repo. If planning/execution discovers external docs, examples, security/version behavior, GitHub issues, similar implementations, or troubleshooting evidence is needed, create a ResearchRequest and resolve it through strict_programmatic research instead of guessing.",
+      `Available agents for routing context only: ${agentNames}. App subagents remain best-effort and are not the strict execution layer.`,
+      `ResearchRequest CLI examples for this runId: codex-hardflow research request create --run-id ${marker.runId} --requested-by executor --stage execution --reason \"external docs needed\" --question \"...\" --required-buckets official_docs,github; codex-hardflow research request run --strict-programmatic --run-id ${marker.runId} --request-id <requestId>.`,
+      "For app_handoff/manual modes, require explicit user approval to downgrade after strict failure. Backfilled App/manual evidence must be recorded with official report commands and must not claim programmaticMultiAgent unless SDK/deterministic workers ran.",
+      "Do not use inline internal TypeScript imports or development TypeScript entrypoints for normal runs; those are for explicit maintainer work only.",
+      "If routerOutput.requiresExecutorManifest, write .agent/manifests/executor_manifest.json before stopping. If executor_manifest.externalResearchNeeded=true, unresolved blocking ResearchRequests must be resolved or explicitly failed before completion. If routerOutput requiresValidation or requiresFinalHoldout, keep validator feedback sanitized and run the required validation/final-holdout gate before claiming completion."
     ].join(" ");
 
   appendHookEvent(cwd, {

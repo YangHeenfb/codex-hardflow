@@ -6,6 +6,7 @@ import { sanitizeText } from "../sanitizer.js";
 import { incrementBlockCount, markerExpired, resolveCurrentMarker, updateMarker, type HookMarker } from "../hookState.js";
 import { appendHookEvent, assertHookActive } from "../hookEvents.js";
 import { assertResearchReportEvidence } from "../researchOrchestrator.js";
+import { blockingResearchRequests, failedBlockingResearchRequests, listResearchRequests } from "../research/researchRequest.js";
 import { readRouterTrace } from "../router/routerTrace.js";
 import type { RouterOutput } from "../router/routerSchema.js";
 
@@ -33,6 +34,24 @@ function blockOrAllow(marker: HookMarker, reason: string): GateOutput {
     decision: "block",
     reason,
     marker: { turnId: next.turnId, promptHash: next.promptHash, blockCount: next.blockCount, maxBlocks: next.maxBlocks }
+  };
+}
+
+function blockRouterRequiredOnce(marker: HookMarker, reason: string): GateOutput {
+  const routerBlockCount = marker.routerBlockCount ?? 0;
+  if (routerBlockCount >= 1) {
+    return {
+      decision: "allow",
+      notice: `codex-hardflow router preflight already blocked once: ${reason}`,
+      hardflowStatus: "router_required_missing_after_one_block",
+      marker: { turnId: marker.turnId, promptHash: marker.promptHash, routerBlockCount }
+    };
+  }
+  const next = updateMarker(marker, { routerBlockCount: routerBlockCount + 1 });
+  return {
+    decision: "block",
+    reason,
+    marker: { turnId: next.turnId, promptHash: next.promptHash, routerBlockCount: next.routerBlockCount }
   };
 }
 
@@ -71,6 +90,16 @@ function fallbackResearchReportPath(cwd: string): string | null {
   return null;
 }
 
+function currentReportForMarker(cwd: string, marker: HookMarker): { report?: ResearchReport; reason?: string } {
+  const markerRunId = typeof marker.runId === "string" && marker.runId.length > 0 ? marker.runId : undefined;
+  const path = markerRunId ? researchRunReportPath(cwd, markerRunId) : fallbackResearchReportPath(cwd);
+  if (!path) return { reason: "research_report.json path could not be resolved for this hardflow marker." };
+  if (!existsSync(path)) return { reason: "research_report.json is missing for this hardflow turn." };
+  const report = parseJson<ResearchReport>(path);
+  if (!report) return { reason: "research_report.json is not valid JSON." };
+  return { report };
+}
+
 function validateCurrentPointer(cwd: string, report: ResearchReport): { valid: boolean; reason?: string } {
   const currentPath = currentResearchReportPath(cwd);
   if (!existsSync(currentPath)) return { valid: true };
@@ -81,6 +110,11 @@ function validateCurrentPointer(cwd: string, report: ResearchReport): { valid: b
   }
   return { valid: true };
 }
+
+type ExecutorManifestResearchFields = {
+  externalResearchNeeded?: boolean;
+  unresolvedResearchRequests?: string[];
+};
 
 function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid: boolean; reason?: string } {
   const markerRunId = typeof marker.runId === "string" && marker.runId.length > 0 ? marker.runId : undefined;
@@ -203,6 +237,14 @@ export function stopValidationGate(input: Record<string, unknown> = {}): Record<
 
   const trace = readRouterTrace(cwd, marker.runId, marker.turnId);
   const routerOutput: RouterOutput | undefined = trace?.routerOutput;
+  if (marker.routeStatus === "router_required" && !routerOutput) {
+    return finish(
+      blockRouterRequiredOnce(
+        marker,
+        "router_trace/routerOutput is missing for this UserPromptSubmit marker. Run codex-hardflow route --run-id <runId> --write-trace \"<prompt>\"; do not use keyword fallback."
+      )
+    );
+  }
   if (trace && (trace.owner ?? "parent") === "subagent" && (marker.requiresSourceMatrix || marker.requiresExecutorManifest || marker.requiresValidation)) {
     return finish(blockOrAllow(marker, "Parent router_trace is missing for this hardflow marker; a subagent router_trace cannot satisfy the parent Stop gate."));
   }
@@ -210,12 +252,39 @@ export function stopValidationGate(input: Record<string, unknown> = {}): Record<
     return finish(blockOrAllow(marker, "router_trace/routerOutput is missing for this hardflow marker. Generate .agent/reports/runs/<runId>/router_trace.json; do not use keyword fallback."));
   }
   if (routerOutput?.route === "router_failed") {
-    updateMarker(marker, { status: "completed" });
+    updateMarker(marker, { status: "completed", routeStatus: "router_failed" });
     return finish({ decision: "allow", notice: "Router failed; hardflow classification was not claimed. Ask for confirmation before code changes." });
   }
   if (routerOutput?.route === "bypass" || routerOutput?.bypass.requested) {
-    updateMarker(marker, { status: "completed" });
+    updateMarker(marker, { status: "completed", routeStatus: "router_ready" });
     return finish({ decision: "allow", notice: "Router selected bypass; Stop gate allowed." });
+  }
+  if (routerOutput) updateMarker(marker, { routeStatus: "router_ready" });
+
+  if (routerOutput?.route === "direct_answer") {
+    updateMarker(marker, { status: "completed", routeStatus: "router_ready" });
+    return finish({ decision: "allow", notice: "Router selected direct_answer; no research run is required." });
+  }
+
+  const automaticRouterResearch = routerOutput?.route === "research" && (marker.triggerSource === "hook_user_prompt_submit" || marker.routeStatus === "router_required");
+  if (automaticRouterResearch) {
+    const current = currentReportForMarker(cwd, marker);
+    if (!current.report) {
+      return finish(
+        blockOrAllow(
+          marker,
+          `${current.reason ?? "strict research_report.json is missing."} Run codex-hardflow research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required --run-id ${marker.runId} "<prompt>".`
+        )
+      );
+    }
+    if (current.report.runner_mode !== "strict_programmatic") {
+      return finish(blockOrAllow(marker, `route=research requires strict_programmatic sdk_threads research; runner_mode=${current.report.runner_mode} cannot satisfy it.`));
+    }
+    if (current.report.status === "failed") {
+      return finish(blockOrAllow(marker, `strict_programmatic research failed: ${current.report.failure_reason ?? "missing failure_reason"}. Ask the user before downgrading to App/manual search.`));
+    }
+    const report = validateCurrentResearchReport(cwd, marker);
+    if (!report.valid) return finish(blockOrAllow(marker, report.reason ?? "strict_programmatic research_report.json does not satisfy the current hardflow marker."));
   }
 
   const requiresSourceMatrix = routerOutput?.requiresSourceMatrix ?? marker.requiresSourceMatrix;
@@ -223,13 +292,36 @@ export function stopValidationGate(input: Record<string, unknown> = {}): Record<
   const requiresValidation = routerOutput?.requiresValidation ?? marker.requiresValidation;
   const requiresFinalHoldout = routerOutput?.requiresFinalHoldout ?? false;
 
-  if (requiresSourceMatrix) {
+  if (requiresSourceMatrix && !automaticRouterResearch) {
     const report = validateCurrentResearchReport(cwd, marker);
     if (!report.valid) return finish(blockOrAllow(marker, report.reason ?? "research_report.json does not satisfy the current hardflow marker."));
   }
 
   if (requiresExecutorManifest && !existsSync(executorManifestPath(cwd))) {
     return finish(blockOrAllow(marker, "executor_manifest.json is missing for this implementation marker. Generate .agent/manifests/executor_manifest.json before stopping."));
+  }
+  if (requiresExecutorManifest && existsSync(executorManifestPath(cwd))) {
+    const manifest = parseJson<ExecutorManifestResearchFields>(executorManifestPath(cwd));
+    const unresolved = manifest?.unresolvedResearchRequests ?? [];
+    if (manifest?.externalResearchNeeded === true && unresolved.length > 0) {
+      return finish(blockOrAllow(marker, `executor_manifest.externalResearchNeeded=true with unresolved blocking ResearchRequests: ${unresolved.join(", ")}.`));
+    }
+    if (manifest?.externalResearchNeeded === true && unresolved.length === 0) {
+      const resolvedResearch = listResearchRequests(cwd, marker.runId).filter((request) => request.status === "resolved" && Boolean(request.linkedResearchRunId));
+      if (resolvedResearch.length === 0) {
+        return finish(blockOrAllow(marker, "executor_manifest.externalResearchNeeded=true but no resolved linked strict ResearchRequest was recorded."));
+      }
+    }
+  }
+
+  const requests = listResearchRequests(cwd, marker.runId);
+  const blocking = blockingResearchRequests(requests);
+  if (blocking.length > 0) {
+    return finish(blockOrAllow(marker, `blocking ResearchRequest pending/running: ${blocking.map((request) => request.requestId).join(", ")}.`));
+  }
+  const failedBlocking = failedBlockingResearchRequests(requests);
+  if (failedBlocking.length > 0) {
+    return finish(blockOrAllow(marker, `blocking ResearchRequest failed: ${failedBlocking.map((request) => `${request.requestId}:${request.failureReason ?? "no failureReason"}`).join(", ")}. Ask the user whether to continue without external evidence.`));
   }
 
   if (!requiresValidation && !requiresFinalHoldout) {
