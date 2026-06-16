@@ -91,6 +91,14 @@ export function researchRunEvidenceLedgerPath(cwd: string, runId: string): strin
   return join(researchRunDir(cwd, runId), "evidence_ledger.json");
 }
 
+export function researchRunRequestsDir(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "research_requests");
+}
+
+export function researchRunRequestPath(cwd: string, runId: string, requestId: string): string {
+  return join(researchRunRequestsDir(cwd, runId), `${safeReportSegment(requestId)}.json`);
+}
+
 export function researchRunHookEventsPath(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "hook_events.jsonl");
 }

@@ -33,9 +33,26 @@ import {
   resumeResearchRun,
   runResearch
 } from "./researchOrchestrator.js";
+import {
+  createResearchRequest,
+  listResearchRequests,
+  resolveResearchRequest,
+  runResearchRequest
+} from "./research/researchRequest.js";
 import { runLlmRouter } from "./router/llmRouter.js";
 import type { RouterTraceOwner } from "./router/routerSchema.js";
-import type { Confidence, CoverageMode, ResearchRunnerMode, ResearchSource, SubagentReportStatus } from "./schemas.js";
+import type {
+  Confidence,
+  CoverageMode,
+  ParallelPolicy,
+  ResearchRequestRequestedBy,
+  ResearchRequestStage,
+  ResearchRequestStatus,
+  ResearchRequestUrgency,
+  ResearchRunnerMode,
+  ResearchSource,
+  SubagentReportStatus
+} from "./schemas.js";
 import { validate } from "./validationOrchestrator.js";
 
 const require = createRequire(import.meta.url);
@@ -75,6 +92,36 @@ function coverageModeFlag(value: string | undefined): CoverageMode | undefined {
   if (value === undefined) return undefined;
   if (value === "exhaustive" || value === "balanced" || value === "fast") return value;
   throw new Error(`Invalid --coverage-mode: ${value}`);
+}
+
+function parallelPolicyFlag(value: string | undefined): ParallelPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (value === "all_required" || value === "fixed" || value === "adaptive" || value === "wave") return value;
+  throw new Error(`Invalid --parallel-policy: ${value}`);
+}
+
+function requestedByFlag(value: string | undefined): ResearchRequestRequestedBy {
+  if (value === "planner" || value === "executor" || value === "validator" || value === "reviewer" || value === "stop_hook") return value;
+  if (value === undefined) return "executor";
+  throw new Error(`Invalid --requested-by: ${value}`);
+}
+
+function requestStageFlag(value: string | undefined): ResearchRequestStage {
+  if (value === "planning" || value === "execution" || value === "validation" || value === "review" || value === "repair") return value;
+  if (value === undefined) return "execution";
+  throw new Error(`Invalid --stage: ${value}`);
+}
+
+function requestUrgencyFlag(value: string | undefined): ResearchRequestUrgency {
+  if (value === "blocking" || value === "non_blocking") return value;
+  if (value === undefined) return "blocking";
+  throw new Error(`Invalid --urgency: ${value}`);
+}
+
+function requestResolveStatusFlag(value: string | undefined): Extract<ResearchRequestStatus, "resolved" | "failed" | "cancelled"> | undefined {
+  if (value === undefined) return undefined;
+  if (value === "resolved" || value === "failed" || value === "cancelled") return value;
+  throw new Error(`Invalid --status for request resolve: ${value}`);
 }
 
 function validDiagnosticsCommand(value: string | undefined): value is DiagnosticsCommand {
@@ -298,6 +345,68 @@ async function main(): Promise<void> {
       }
       case "research": {
         const researchSubcommand = args[0];
+        if (researchSubcommand === "request") {
+          const requestCommand = args[1];
+          const parsed = parseFlagArgs(args.slice(2));
+          if (requestCommand === "create") {
+            const input = await readOptionalStdinJson();
+            const requiredBuckets = parseCsv(stringFlag(parsed.flags, "required-buckets"), stringArrayField(input, ["requiredBuckets", "required_buckets"]) ?? []);
+            printJson(
+              createResearchRequest(cwd, {
+                runId: pickString(parsed.flags, input, ["run-id"], ["runId", "run_id"], true) ?? "",
+                requestId: pickString(parsed.flags, input, ["request-id"], ["requestId", "request_id"]),
+                requestedBy: requestedByFlag(pickString(parsed.flags, input, ["requested-by"], ["requestedBy", "requested_by"])),
+                stage: requestStageFlag(pickString(parsed.flags, input, ["stage"], ["stage"])),
+                reason: pickString(parsed.flags, input, ["reason"], ["reason"], true) ?? "",
+                question: pickString(parsed.flags, input, ["question"], ["question"], true) ?? "",
+                requiredBuckets,
+                urgency: requestUrgencyFlag(pickString(parsed.flags, input, ["urgency"], ["urgency"])),
+                contextRefs: pickStringArray(parsed.flags, input, "context-ref", ["contextRefs", "context_refs"]),
+                relatedFiles: pickStringArray(parsed.flags, input, "related-file", ["relatedFiles", "related_files"])
+              })
+            );
+            return;
+          }
+          if (requestCommand === "list") {
+            printJson({ requests: listResearchRequests(cwd, stringFlag(parsed.flags, "run-id")) });
+            return;
+          }
+          if (requestCommand === "run") {
+            if (!booleanFlag(parsed.flags, "strict-programmatic")) {
+              throw new Error("codex-hardflow research request run requires --strict-programmatic.");
+            }
+            printJson(
+              await runResearchRequest(cwd, stringFlag(parsed.flags, "run-id", true) ?? "", stringFlag(parsed.flags, "request-id", true) ?? "", {
+                sourceRoot,
+                strictProgrammatic: true,
+                coverageMode: "exhaustive",
+                parallelPolicy: "all_required",
+                maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
+                workerLeaseMs: numberFlag(parsed.flags, "worker-lease"),
+                softTimeoutMs: numberFlag(parsed.flags, "soft-timeout"),
+                hardTimeoutMs: numberFlag(parsed.flags, "hard-timeout"),
+                globalBudgetMs: numberFlag(parsed.flags, "global-budget"),
+                heartbeatIntervalMs: numberFlag(parsed.flags, "heartbeat-interval"),
+                maxNoProgressHeartbeats: numberFlag(parsed.flags, "max-no-progress-heartbeats"),
+                maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker")
+              })
+            );
+            return;
+          }
+          if (requestCommand === "resolve") {
+            printJson(
+              resolveResearchRequest(cwd, {
+                runId: stringFlag(parsed.flags, "run-id", true) ?? "",
+                requestId: stringFlag(parsed.flags, "request-id", true) ?? "",
+                status: requestResolveStatusFlag(stringFlag(parsed.flags, "status")),
+                linkedResearchRunId: stringFlag(parsed.flags, "linked-research-run-id"),
+                failureReason: stringFlag(parsed.flags, "failure-reason")
+              })
+            );
+            return;
+          }
+          throw new Error("Usage: codex-hardflow research request <create|list|run|resolve>");
+        }
         if (researchSubcommand === "resume") {
           const parsed = parseFlagArgs(args.slice(1));
           printJson(
@@ -340,13 +449,13 @@ async function main(): Promise<void> {
         if (executeSdkResearch && requestedRunner && requestedRunner !== "sdk_threads" && requestedRunner !== "strict_programmatic") {
           throw new Error("--execute-sdk-research conflicts with non-sdk --runner.");
         }
-        const runnerMode: ResearchRunnerMode = strictProgrammatic
+        const runnerMode: ResearchRunnerMode | undefined = strictProgrammatic
           ? "strict_programmatic"
           : executeSdkResearch
             ? "sdk_threads"
           : validRunnerMode(requestedRunner)
             ? requestedRunner
-            : "app_handoff";
+            : undefined;
         printJson(
           await runResearch(task, cwd, {
             sourceRoot,
@@ -357,6 +466,7 @@ async function main(): Promise<void> {
             executeSdkResearch,
             strictProgrammatic,
             coverageMode: coverageModeFlag(stringFlag(parsed.flags, "coverage-mode")),
+            parallelPolicy: parallelPolicyFlag(stringFlag(parsed.flags, "parallel-policy")),
             runRouter: booleanFlag(parsed.flags, "run-router"),
             maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
             workerLeaseMs: numberFlag(parsed.flags, "worker-lease"),
@@ -367,7 +477,7 @@ async function main(): Promise<void> {
             heartbeatIntervalMs: numberFlag(parsed.flags, "heartbeat-interval"),
             maxNoProgressHeartbeats: numberFlag(parsed.flags, "max-no-progress-heartbeats"),
             maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
-            progress: runnerMode === "sdk_threads" ? sdkProgress : undefined
+            progress: runnerMode === "sdk_threads" || runnerMode === "strict_programmatic" ? sdkProgress : undefined
           })
         );
         return;
@@ -589,9 +699,14 @@ async function main(): Promise<void> {
           usage: [
             "codex-hardflow status",
             "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
+            "codex-hardflow research --run-id <runId> \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff --run-router \"task...\"",
-            "codex-hardflow research --run-id <runId> --strict-programmatic [--coverage-mode exhaustive|balanced|fast] [--max-sources-per-worker <n>] \"task...\"",
+            "codex-hardflow research --run-id <runId> --strict-programmatic [--coverage-mode exhaustive|balanced|fast] [--parallel-policy all_required|fixed|adaptive|wave] [--max-sources-per-worker <n>] \"task...\"",
+            "codex-hardflow research request create --run-id <runId> --requested-by executor --stage execution --reason <reason> --question <question> [--required-buckets a,b]",
+            "codex-hardflow research request list [--run-id <runId>]",
+            "codex-hardflow research request run --strict-programmatic --run-id <runId> --request-id <requestId>",
+            "codex-hardflow research request resolve --run-id <runId> --request-id <requestId> [--status resolved|failed|cancelled]",
             "codex-hardflow research resume --run-id <runId>",
             "codex-hardflow research workers --run-id <runId>",
             "codex-hardflow research cancel --run-id <runId> --bucket <bucket>",

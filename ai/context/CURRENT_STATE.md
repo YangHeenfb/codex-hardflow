@@ -2,7 +2,7 @@
 
 ## Last Updated
 
-2026-06-12
+2026-06-13
 
 ## Branch
 
@@ -10,13 +10,18 @@
 
 ## Current Objective
 
-Perform a one-time legacy ChatGPT context backfill so new ChatGPT Web
-conversations can reason about codex-hardflow from durable repo files instead
-of old chat memory.
+Commit and push the current hardflow trigger-policy implementation work.
+
+The current product changes make automatic UserPromptSubmit/Router research use
+strict programmatic SDK execution by default instead of App handoff/subagent
+prompting. They also add ResearchRequest plumbing for implementation turns that
+discover external evidence needs after initial routing.
 
 ## Plan
 
-No active implementation plan. This is a documentation/workflow context task.
+No separate active plan file was created for this commit. The working set is a
+coherent implementation milestone around router-required prompt handling,
+strict programmatic research defaults, and ResearchRequest gates.
 
 New planning and review conversations should read:
 
@@ -26,6 +31,33 @@ New planning and review conversations should read:
 - `ai/decisions/DECISION_LOG.md`
 - the relevant plan under `ai/plans/`
 - `ai/reports/CODEX_REPORT.md`
+
+## Current Implementation Status
+
+Implemented in the current working tree before commit:
+
+- `UserPromptSubmit` creates router-required markers for every non-empty prompt
+  and injects explicit route/research CLI commands.
+- `route=research` now defaults to `strict_programmatic`,
+  `coverageMode=exhaustive`, and `parallelPolicy=all_required`.
+- App subagents are documented and prompted as best-effort only, not the strict
+  coverage mechanism.
+- `codex-hardflow research request` subcommands were added for create, list,
+  run, and resolve.
+- Stop gate checks now block automatic research routes unless a matching strict
+  programmatic report satisfies the run-owned evidence requirements.
+- Stop gate blocks unresolved or failed blocking ResearchRequests and executor
+  manifests that claim external research is needed without linked strict
+  research.
+- README, source coverage protocol, global AGENTS text, and skill text were
+  updated to match the new trigger-policy direction.
+
+Verification:
+
+- `npm run verify`: passed on 2026-06-13 at 01:34 CST.
+- Build passed.
+- Vitest passed: 24 test files, 185 tests.
+- Self verification and pack dry-run check passed with `forbidden: []`.
 
 ## Legacy Backfill Status
 
@@ -165,7 +197,8 @@ does not prove that all-required is already the code default.
 
 - The sample is intentionally small: two repeats per variant.
 - The diagnostics summary's built-in `conclusion` remains generic and still notes transient noise, but the explicit experiment decision logic passes for all-parallel viability.
-- Existing uncommitted product source/test changes remain in the working tree and were not staged or reverted.
+- Existing product source/test changes are now treated as the current
+  router/ResearchRequest implementation milestone to commit and push.
 - The diagnostics JSON is under `.agent/reports/diagnostics/` and was not added to git.
 - Current branch name is `agent/2026-06-11-chatgpt-codex-handoff`, which is stale for this backfill task but still the active branch.
 - Existing handoff files already contain uncommitted diagnostics experiment context.
@@ -183,17 +216,20 @@ Source priority:
 Known anomalies:
 
 - Branch name is stale for this backfill task.
-- Product source/test dirty changes exist in the working tree and are unrelated.
+- Product source/test changes belong to the current router/ResearchRequest
+  milestone being committed.
 - The all-parallel stress result is experiment-only unless later confirmed.
 - Legacy context claims are migrated summaries, not automatically verified facts.
 
 Expected output format:
 
 - Review findings first.
-- Then state whether the context is sufficient for a new ChatGPT planning conversation.
-- Then list any missing durable context.
+- Then state whether the router/ResearchRequest milestone is coherent and safe
+  to merge after PR review.
+- Then list any missing durable context, tests, or docs.
 - Then provide the next Codex-ready prompt.
 
 Next Codex prompt request:
 
-- Please provide the exact next prompt the user should give Codex.
+- Please provide the exact next prompt the user should give Codex to address
+  any PR review findings or proceed toward merge.

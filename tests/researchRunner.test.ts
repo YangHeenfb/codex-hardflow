@@ -586,20 +586,24 @@ describe("research runner reports", () => {
     expect(report.programmaticMultiAgent).toBe(true);
   });
 
-  it("starts SDK threads only when sdk_threads or executeSdkResearch is explicit", async () => {
+  it("defaults research route to strict_programmatic exhaustive all_required SDK threads", async () => {
     const cwd = tempRepo();
     let sdkCalls = 0;
     const defaultReport = await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),
       routerOutput: broadResearchRouterOutput,
+      sdkAvailable: true,
       input: { turnId: "turn-default-app-handoff" },
       sdkPromptRunner: async (_prompt, _cwd, bucket) => {
         sdkCalls += 1;
         return validRunnerJson(bucket);
       }
     });
-    expect(defaultReport.runner_mode).toBe("app_handoff");
-    expect(sdkCalls).toBe(0);
+    expect(defaultReport.runner_mode).toBe("strict_programmatic");
+    expect(defaultReport.coverageMode).toBe("exhaustive");
+    expect(defaultReport.parallelPolicy).toBe("all_required");
+    expect(defaultReport.programmaticMultiAgent).toBe(true);
+    expect(sdkCalls).toBeGreaterThan(0);
 
     await runResearch("research current agent framework choices", cwd, {
       sourceRoot: process.cwd(),

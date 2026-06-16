@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join, resolve } from "node:path";
 import { cliPathStatus } from "./cliPaths.js";
 import { executorManifestPath, hardflowStateDir, repoHash, researchRunReportPath, validationSummaryPath } from "./paths.js";
-import type { TriggerSource } from "./schemas.js";
+import type { RouteStatus, TriggerSource } from "./schemas.js";
 
 export type HookMarkerStatus = "active" | "completed" | "bypassed" | "expired";
 export type HookTaskType = "router-preflight" | "research-heavy" | "implementation" | "validation-sensitive" | "hardflow-maintenance" | "bypass";
@@ -23,6 +23,8 @@ export interface HookMarker {
   requiresExecutorManifest: boolean;
   requiresValidation: boolean;
   bypass: boolean;
+  routeStatus?: RouteStatus;
+  routerBlockCount?: number;
   blockCount: number;
   maxBlocks: number;
   cwd: string;
@@ -46,6 +48,7 @@ export interface CreateHookMarkerOptions {
   requiresExecutorManifest: boolean;
   requiresValidation: boolean;
   bypass?: boolean;
+  routeStatus?: RouteStatus;
   input?: Record<string, unknown>;
   now?: Date;
   ttlMs?: number;
@@ -166,6 +169,8 @@ export function createHookMarker(options: CreateHookMarkerOptions): HookMarker {
     requiresExecutorManifest: options.requiresExecutorManifest,
     requiresValidation: options.requiresValidation,
     bypass: options.bypass === true,
+    routeStatus: options.routeStatus,
+    routerBlockCount: 0,
     blockCount: 0,
     maxBlocks: options.maxBlocks ?? DEFAULT_MAX_BLOCKS,
     cwd,

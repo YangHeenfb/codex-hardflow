@@ -31,16 +31,14 @@ describe("UserPromptSubmit router preflight injection", () => {
     expect(additionalContext(result)).toContain("not by keyword matching");
     expect(additionalContext(result)).toContain("official_docs_researcher");
     expect(additionalContext(result)).toContain("codex_default_researcher");
-    expect(additionalContext(result)).toContain("Spawn the relevant source-specific researcher subagents");
-    expect(additionalContext(result)).toContain("subagent_status = \"not_spawned\"");
-    expect(additionalContext(result)).toContain("hardflow injected context is the explicit request");
-    expect(additionalContext(result)).toContain("codex-hardflow report add-source");
-    expect(additionalContext(result)).toContain("codex-hardflow report finalize-manual");
-    expect(additionalContext(result)).toContain("research --runner app_handoff");
+    expect(additionalContext(result)).toContain("routeStatus=router_required");
+    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).toContain("strict_programmatic/sdk_threads only");
+    expect(additionalContext(result)).toContain("ResearchRequest CLI examples");
+    expect(additionalContext(result)).not.toContain("research --runner app_handoff");
     expect(additionalContext(result)).toContain("--run-id");
     expect(additionalContext(result)).toContain("runs/");
-    expect(additionalContext(result)).toContain("subagents/");
-    expect(additionalContext(result)).toContain("Do not synchronously launch SDK researcher threads");
+    expect(additionalContext(result)).toContain("App subagents remain best-effort");
     expect(additionalContext(result)).not.toContain("node --import tsx");
     expect(additionalContext(result)).not.toContain("npx tsx src/cli.ts");
   });
@@ -49,7 +47,7 @@ describe("UserPromptSubmit router preflight injection", () => {
     const result = userPromptSubmit(
       {
         cwd: process.cwd(),
-        prompt: "我这个项目有什么类似产品/项目？有哪些可以吸收改进的？",
+        prompt: "我现在这个项目做的multi agent结构有什么类似的产品或者项目？有哪些我可以吸收改进的？",
         turnId: "turn-userprompt-local-competitors"
       },
       process.cwd()
@@ -57,7 +55,40 @@ describe("UserPromptSubmit router preflight injection", () => {
 
     expect(additionalContext(result)).toContain("local_repo_researcher");
     expect(additionalContext(result)).toContain("competitor_researcher");
-    expect(additionalContext(result)).toContain("Spawn the relevant source-specific researcher subagents");
+    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).toContain("Ordinary web_search output");
+    expect(additionalContext(result)).not.toContain("App interactive research should use app_handoff by default");
+    expect(additionalContext(result)).not.toContain("Do not synchronously launch SDK researcher threads unless explicitly requested");
+  });
+
+  it("injects strict research command for agentic long horizon work prompts", () => {
+    const result = userPromptSubmit(
+      {
+        cwd: process.cwd(),
+        prompt: "What are current practical solutions for agentic long horizon work? 中文回答",
+        turnId: "turn-agentic-long-horizon"
+      },
+      process.cwd()
+    );
+
+    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).toContain("--parallel-policy all_required");
+    expect(additionalContext(result)).not.toContain("research --runner app_handoff");
+    expect(additionalContext(result)).not.toContain("SDK researcher threads unless explicitly requested");
+  });
+
+  it("injects strict research command for hidden validation solution prompts", () => {
+    const result = userPromptSubmit(
+      {
+        cwd: process.cwd(),
+        prompt: "Find current practical hidden validation solutions for AI coding agents",
+        turnId: "turn-hidden-validation-solutions"
+      },
+      process.cwd()
+    );
+
+    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).not.toContain("app_handoff by default");
   });
 
   it("does not overblock simple or bypassed prompts", () => {
@@ -65,11 +96,12 @@ describe("UserPromptSubmit router preflight injection", () => {
     expect(simple.decision).toBe("allow");
     expect((simple.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
     expect(additionalContext(simple)).toContain("router preflight");
-    expect(additionalContext(simple)).not.toContain("Spawn the relevant source-specific researcher subagents");
+    expect(additionalContext(simple)).toContain("route=direct_answer");
+    expect(additionalContext(simple)).not.toContain("research --runner app_handoff");
     const bypass = userPromptSubmit({ prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd());
     expect(bypass.decision).toBe("allow");
-    expect(additionalContext(bypass)).toContain("set route=router_failed");
-    expect(additionalContext(bypass)).toContain("If router fails");
+    expect(additionalContext(bypass)).toContain("structured output is unavailable");
+    expect(additionalContext(bypass)).toContain("do not use keyword fallback");
   });
 
   it("keeps developer entrypoint warnings out of normal App instructions", () => {

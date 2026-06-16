@@ -90,9 +90,11 @@ describe("programmatic trigger audit", () => {
       runId: marker.runId,
       turnId: marker.turnId,
       routerOutput: broadResearchRouterOutput,
+      runnerMode: "strict_programmatic",
       triggerSource: "agents_md_only",
       programmaticTrigger: false
     }) as unknown as Record<string, unknown>;
+    report.status = "completed";
     writeParentReport(cwd, marker, report);
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });

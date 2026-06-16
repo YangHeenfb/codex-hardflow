@@ -277,3 +277,116 @@ Expected output format:
 Next Codex prompt request:
 
 - Please provide the exact next prompt the user should give Codex.
+
+## Report Entry: Router-Required Strict Research And ResearchRequests
+
+### Task
+
+Commit and push the current implementation milestone that moves automatic
+UserPromptSubmit/Router research away from App handoff/subagent prompting and
+toward strict programmatic SDK execution.
+
+### Files Changed
+
+- `README.md`
+- `docs/source-coverage-protocol.md`
+- `src/cli.ts`
+- `src/config.ts`
+- `src/flagParser.ts`
+- `src/hookState.ts`
+- `src/hooks/stopValidationGate.ts`
+- `src/hooks/userPromptSubmit.ts`
+- `src/paths.ts`
+- `src/research/researchRequest.ts`
+- `src/researchOrchestrator.ts`
+- `src/router/routerPrompt.ts`
+- `src/schemas.ts`
+- `src/triggerPolicy.ts`
+- `tests/flagParser.test.ts`
+- `tests/hookState.test.ts`
+- `tests/researchRequest.test.ts`
+- `tests/researchRunner.test.ts`
+- `tests/triggerAudit.test.ts`
+- `tests/triggerPolicy.test.ts`
+- `tests/userPromptSubmit.test.ts`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Summary
+
+- `UserPromptSubmit` now marks every non-empty prompt as router-required and
+  injects exact CLI commands for route preflight and strict research.
+- `route=research` defaults to `strict_programmatic`,
+  `coverageMode=exhaustive`, and `parallelPolicy=all_required`.
+- App subagents are retained only as best-effort/manual downgrade workers, not
+  as the strict coverage mechanism.
+- Added `codex-hardflow research request` create/list/run/resolve plumbing for
+  implementation turns that discover external evidence needs.
+- Stop gate now enforces strict research reports for automatic research routes
+  and blocks unresolved or failed blocking ResearchRequests.
+- Protocol docs, README, generated global AGENTS text, and generated skill text
+  were updated to match the stricter trigger-policy direction.
+
+### Verification Commands
+
+- `npm run verify`: passed on 2026-06-13 01:34 CST.
+  - `npm run build`: passed.
+  - `npm test`: passed, 24 test files and 185 tests.
+  - `node dist/cli.js verify:self`: passed; pack dry-run check had
+    `forbidden: []`, global wrapper was fresh, and the wrapper pointed to the
+    current source root.
+
+### Safety Checklist
+
+- [x] User explicitly requested commit and push.
+- [x] Reviewed `git status --short` before staging.
+- [x] Reviewed product and test diffs before staging.
+- [x] Used a single coherent staging scope for router/research-request changes.
+- [x] Updated `ai/context/CURRENT_STATE.md`.
+- [x] Updated `ai/reports/CODEX_REPORT.md`.
+- [x] No `.env`, secrets, raw traces, huge logs, hidden fixtures, or private
+  validation artifacts were added.
+
+### Known Anomalies
+
+- Branch name remains stale: `agent/2026-06-11-chatgpt-codex-handoff`.
+- No new plan file was created for this implementation milestone.
+- Existing `.agent/reports/diagnostics/` JSON outputs remain untracked.
+- The Stop gate still blocks router-required markers once for a missing router
+  trace before allowing with a failure notice; this is documented test coverage,
+  but may be stricter in a later change if the user wants hard blocking.
+
+### Next ChatGPT Question
+
+Please review the router-required strict research and ResearchRequest milestone
+using:
+
+- uploaded files, the current PR, and the current branch diff first;
+- `ai/context/CURRENT_STATE.md`;
+- `ai/context/PROJECT_CONTEXT.md`;
+- `ai/context/REVIEW_PROTOCOL.md`;
+- `ai/decisions/DECISION_LOG.md`;
+- `ai/reports/CODEX_REPORT.md`;
+- old chat memory only as unverified context.
+
+Known anomalies:
+
+- Branch name is stale for this implementation milestone.
+- No separate plan file exists for this milestone.
+- Existing diagnostics artifacts under `.agent/reports/diagnostics/` are not
+  committed.
+- The router-required missing-trace Stop gate currently blocks once, then allows
+  with a notice.
+
+Expected output format:
+
+- Review findings first.
+- Then state whether the milestone is coherent and safe to merge after PR
+  review.
+- Then list missing tests, docs, or durable context.
+- Then provide the next Codex-ready prompt.
+
+Next Codex prompt request:
+
+- Please provide the exact next prompt the user should give Codex to address
+  any PR review findings or proceed toward merge.
