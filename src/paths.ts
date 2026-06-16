@@ -91,6 +91,10 @@ export function researchRunEvidenceLedgerPath(cwd: string, runId: string): strin
   return join(researchRunDir(cwd, runId), "evidence_ledger.json");
 }
 
+export function researchRunHookInputPath(cwd: string, runId: string): string {
+  return join(researchRunDir(cwd, runId), "hook_input.json");
+}
+
 export function researchRunRequestsDir(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "research_requests");
 }

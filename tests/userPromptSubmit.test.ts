@@ -1,10 +1,11 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readHookEvents } from "../src/hookEvents.js";
 import { markerPathFor } from "../src/hookState.js";
 import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
-import { repoHash, researchRunRouterTracePath } from "../src/paths.js";
+import { repoHash, researchRunHookInputPath, researchRunRouterTracePath } from "../src/paths.js";
 import type { RouterOutput } from "../src/router/routerSchema.js";
 import { failingRouteRunner, fakeRouteRunner } from "./hookTestUtils.js";
 import { currentProjectCompetitorRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
@@ -25,9 +26,18 @@ function directOutput(): RouterOutput {
 }
 
 describe("UserPromptSubmit router preflight injection", () => {
+  function clearInternalEnv(): void {
+    delete process.env.CODEX_HARDFLOW_INTERNAL;
+    delete process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE;
+    delete process.env.CODEX_HARDFLOW_PARENT_RUN_ID;
+    delete process.env.CODEX_HARDFLOW_INTERNAL_DEPTH;
+  }
+
   beforeEach(() => {
     process.env.CODEX_HARDFLOW_HOME = mkdtempSync(join(tmpdir(), "hardflow-state-"));
+    clearInternalEnv();
   });
+  afterEach(clearInternalEnv);
 
   it("injects router preflight without top-level additionalContext", () => {
     const result = userPromptSubmit(
@@ -51,6 +61,8 @@ describe("UserPromptSubmit router preflight injection", () => {
     expect(additionalContext(result)).toContain("routeStatus=routed");
     expect(additionalContext(result)).toContain("route=research");
     expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).toContain("--input-json");
+    expect(additionalContext(result)).not.toContain("--raw-user-prompt");
     expect(additionalContext(result)).toContain("strict_programmatic/sdk_threads only");
     expect(additionalContext(result)).toContain("ResearchRequest CLI examples");
     expect(additionalContext(result)).not.toContain("research --runner app_handoff");
@@ -79,6 +91,52 @@ describe("UserPromptSubmit router preflight injection", () => {
     expect(marker.routerPreflightSucceeded).toBe(true);
     expect(marker.routerRoute).toBe("research");
     expect(existsSync(researchRunRouterTracePath(cwd, String(marker.runId)))).toBe(true);
+    expect(existsSync(researchRunHookInputPath(cwd, String(marker.runId)))).toBe(true);
+  });
+
+  it("bypasses routing for internal SDK/router prompts", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "hardflow-userprompt-internal-"));
+    process.env.CODEX_HARDFLOW_INTERNAL = "1";
+    process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE = "router";
+    process.env.CODEX_HARDFLOW_PARENT_RUN_ID = "run-parent";
+    process.env.CODEX_HARDFLOW_INTERNAL_DEPTH = "1";
+
+    const result = userPromptSubmit(
+      {
+        cwd,
+        prompt: "You are the codex-hardflow structured task router. Return JSON only.",
+        turnId: "turn-internal-router"
+      },
+      process.cwd(),
+      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs"])) }
+    );
+
+    expect(result.decision).toBe("allow");
+    expect((result.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmitInternalBypass");
+    expect(existsSync(markerPathFor(repoHash(cwd), "turn-internal-router"))).toBe(false);
+    const events = readHookEvents(cwd, "run-parent");
+    expect(events.some((event) => event.eventName === "UserPromptSubmitInternalBypass" && event.internalPurpose === "router")).toBe(true);
+  });
+
+  it("keeps long raw prompts out of generated argv commands", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "hardflow-userprompt-long-"));
+    const longPrompt = `agent long horizon记忆管理方面现在有什么前沿方案？ ${"x".repeat(100_000)}`;
+    const result = userPromptSubmit(
+      {
+        cwd,
+        prompt: longPrompt,
+        turnId: "turn-long-prompt"
+      },
+      process.cwd(),
+      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "github"])) }
+    );
+    const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-long-prompt"), "utf8")) as Record<string, unknown>;
+    const input = JSON.parse(readFileSync(researchRunHookInputPath(cwd, String(marker.runId)), "utf8")) as Record<string, unknown>;
+
+    expect(input.rawUserPrompt).toBe(longPrompt);
+    expect(additionalContext(result)).toContain("--input-json");
+    expect(additionalContext(result)).not.toContain(longPrompt.slice(0, 1000));
+    expect(additionalContext(result).length).toBeLessThan(20_000);
   });
 
   it("routes programmatically without AGENTS.md or skill guidance", () => {

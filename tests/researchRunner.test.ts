@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHookMarker, type HookMarker } from "../src/hookState.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
 import { addManualSourceToReport, addSubagentReport, assertResearchReportEvidence, buildResearchReport, loadResearchReport, mergeSubagentReports, runResearch } from "../src/researchOrchestrator.js";
@@ -27,6 +27,28 @@ function validRunnerJson(bucket: string): string {
   });
 }
 
+function sourceRunnerJson(bucket: string): string {
+  return JSON.stringify({
+    bucket,
+    queries_run: [`${bucket} query`],
+    sources_found: [
+      {
+        bucket,
+        title: `${bucket} source`,
+        source_type: bucket,
+        url_or_ref: `https://example.com/${bucket}`,
+        date_or_version: "2026-06-16",
+        claim: `${bucket} evidence reviewed.`,
+        confidence: "medium",
+        notes: "Mock SDK source."
+      }
+    ],
+    searched_but_no_signal: false,
+    uncertainties: [],
+    recommended_followups: []
+  });
+}
+
 function writeReport(cwd: string, marker: HookMarker, report: Record<string, unknown>): void {
   report.runId = marker.runId;
   report.owner = report.owner ?? "parent";
@@ -44,9 +66,18 @@ function writeReport(cwd: string, marker: HookMarker, report: Record<string, unk
 }
 
 describe("research runner reports", () => {
+  function clearInternalEnv(): void {
+    delete process.env.CODEX_HARDFLOW_INTERNAL;
+    delete process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE;
+    delete process.env.CODEX_HARDFLOW_PARENT_RUN_ID;
+    delete process.env.CODEX_HARDFLOW_INTERNAL_DEPTH;
+  }
+
   beforeEach(() => {
     process.env.CODEX_HARDFLOW_HOME = mkdtempSync(join(tmpdir(), "hardflow-state-"));
+    clearInternalEnv();
   });
+  afterEach(clearInternalEnv);
 
   it("does not stop at matrix-only mode when manual fallback is used", async () => {
     const cwd = tempRepo();
@@ -566,6 +597,37 @@ describe("research runner reports", () => {
     expect(report.coverageMode).toBe("exhaustive");
     expect(report.required_buckets.length).toBeGreaterThan(3);
     expect(maxActiveSteps).toBe(report.required_buckets.length);
+  });
+
+  it("sets internal hook bypass env for SDK worker steps", async () => {
+    const cwd = tempRepo();
+    const seenPurposes = new Set<string>();
+    const seenDepths = new Set<string>();
+    const seenParentRunIds = new Set<string>();
+    const report = await runResearch("strict research current agent framework choices", cwd, {
+      sourceRoot: process.cwd(),
+      routerOutput: routerOutputForBuckets(["official_docs"]),
+      strictProgrammatic: true,
+      sdkAvailable: true,
+      input: { turnId: "turn-sdk-internal-env" },
+      sdkStepRunner: async ({ step, bucket, onThreadId }) => {
+        onThreadId(`thread-${bucket}`);
+        seenPurposes.add(process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE ?? "");
+        seenDepths.add(process.env.CODEX_HARDFLOW_INTERNAL_DEPTH ?? "");
+        seenParentRunIds.add(process.env.CODEX_HARDFLOW_PARENT_RUN_ID ?? "");
+        expect(process.env.CODEX_HARDFLOW_INTERNAL).toBe("1");
+        expect(process.env.CODEX_HARDFLOW_PARENT_RUN_ID).toBeTruthy();
+        if (step === "partial_evidence") return sourceRunnerJson(bucket);
+        if (step === "final_report") return sourceRunnerJson(bucket);
+        return JSON.stringify({ bucket, queries_run: [`${bucket} query`], sources_found: [], searched_but_no_signal: false, need_more_work: false });
+      }
+    });
+
+    expect(report.status).toBe("completed");
+    expect(seenPurposes).toContain("sdk_worker");
+    expect(seenDepths).toContain("1");
+    expect(seenParentRunIds).toContain(report.runId);
+    expect(process.env.CODEX_HARDFLOW_INTERNAL).toBeUndefined();
   });
 
   it("strict_programmatic with worker reports records programmaticMultiAgent", async () => {

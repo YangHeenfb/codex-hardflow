@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { researchRunReportPath, researchRunRouterTracePath } from "../paths.js";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { internalEnvFor } from "../internalEnv.js";
+import { researchRunHookInputPath, researchRunReportPath, researchRunRouterTracePath } from "../paths.js";
 import type { ResearchReport } from "../schemas.js";
 import type { RouterTrace } from "../router/routerSchema.js";
 
@@ -13,6 +15,9 @@ export interface RoutePreflightRequest {
   runId: string;
   rawUserPrompt: string;
   timeoutMs: number;
+  turnId?: string;
+  inputJsonPath?: string;
+  triggerSource?: HookInputJson["triggerSource"];
 }
 
 export interface RoutePreflightResult {
@@ -36,6 +41,8 @@ export interface StrictResearchRequest {
   runId: string;
   rawUserPrompt: string;
   timeoutMs: number;
+  turnId?: string;
+  inputJsonPath?: string;
 }
 
 export interface StrictResearchResult {
@@ -69,11 +76,46 @@ function readJsonFile<T>(path: string): T | null {
   }
 }
 
-export function routeCommandArgs(runId: string, rawUserPrompt: string, timeoutMs: number): string[] {
+export interface HookInputJson {
+  rawUserPrompt: string;
+  turnId?: string;
+  cwd: string;
+  sourceRoot?: string;
+  triggerSource: "hook_user_prompt_submit" | "stop_hook";
+  runId: string;
+}
+
+export function writeHookInputJson(cwd: string, runId: string, input: HookInputJson): string {
+  const target = researchRunHookInputPath(cwd, runId);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(input, null, 2)}\n`);
+  return target;
+}
+
+function ensureInputJsonPath(request: RoutePreflightRequest | StrictResearchRequest, triggerSource: HookInputJson["triggerSource"]): string {
+  if (request.inputJsonPath && existsSync(request.inputJsonPath)) return request.inputJsonPath;
+  return writeHookInputJson(request.cwd, request.runId, {
+    runId: request.runId,
+    rawUserPrompt: request.rawUserPrompt,
+    turnId: request.turnId,
+    cwd: request.cwd,
+    triggerSource
+  });
+}
+
+function sanitizeOutput(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 4000);
+}
+
+export function routeCommandArgs(runId: string, rawUserPrompt: string, timeoutMs: number, inputJsonPath?: string): string[] {
+  if (inputJsonPath) return ["route", "--run-id", runId, "--write-trace", "--timeout", String(timeoutMs), "--input-json", inputJsonPath];
   return ["route", "--run-id", runId, "--write-trace", "--timeout", String(timeoutMs), "--raw-user-prompt", rawUserPrompt, rawUserPrompt];
 }
 
-export function strictResearchCommandArgs(runId: string, rawUserPrompt: string): string[] {
+export function strictResearchCommandArgs(runId: string, rawUserPrompt: string, inputJsonPath?: string): string[] {
+  if (inputJsonPath) {
+    return ["research", "--strict-programmatic", "--coverage-mode", "exhaustive", "--parallel-policy", "all_required", "--run-id", runId, "--input-json", inputJsonPath];
+  }
   return ["research", "--strict-programmatic", "--coverage-mode", "exhaustive", "--parallel-policy", "all_required", "--run-id", runId, "--raw-user-prompt", rawUserPrompt, rawUserPrompt];
 }
 
@@ -82,10 +124,24 @@ export function formatCommand(command: string, args: string[]): string {
 }
 
 export function defaultRoutePreflightRunner(request: RoutePreflightRequest): RoutePreflightResult {
-  const args = routeCommandArgs(request.runId, request.rawUserPrompt, request.timeoutMs);
+  const inputJsonPath = ensureInputJsonPath(request, request.triggerSource ?? "hook_user_prompt_submit");
+  const args = routeCommandArgs(request.runId, request.rawUserPrompt, request.timeoutMs, inputJsonPath);
   const command = formatCommand(request.command, args);
+  let env: NodeJS.ProcessEnv;
+  try {
+    env = internalEnvFor(process.env, "router", request.runId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      succeeded: false,
+      tracePath: researchRunRouterTracePath(request.cwd, request.runId),
+      failureReason: message,
+      command
+    };
+  }
   const result = spawnSync(request.command, args, {
     cwd: request.cwd,
+    env,
     encoding: "utf8",
     timeout: request.timeoutMs + SPAWN_TIMEOUT_GRACE_MS,
     maxBuffer: MAX_HOOK_COMMAND_BUFFER
@@ -100,7 +156,7 @@ export function defaultRoutePreflightRunner(request: RoutePreflightRequest): Rou
     : result.error
       ? result.error.message
       : result.status !== 0
-        ? `route command exited with status ${result.status ?? "unknown"}: ${stderr.trim() || stdout.trim() || "no output"}`
+        ? `route command exited with status ${result.status ?? "unknown"}: ${sanitizeOutput(stderr) || sanitizeOutput(stdout) || "no output"}`
         : !trace
           ? "route command did not produce a readable router_trace."
           : trace.route === "router_failed"
@@ -114,17 +170,31 @@ export function defaultRoutePreflightRunner(request: RoutePreflightRequest): Rou
     failureReason,
     timedOut,
     status: result.status,
-    stdout,
-    stderr,
+    stdout: sanitizeOutput(stdout),
+    stderr: sanitizeOutput(stderr),
     command
   };
 }
 
 export function defaultStrictResearchRunner(request: StrictResearchRequest): StrictResearchResult {
-  const args = strictResearchCommandArgs(request.runId, request.rawUserPrompt);
+  const inputJsonPath = ensureInputJsonPath(request, "stop_hook");
+  const args = strictResearchCommandArgs(request.runId, request.rawUserPrompt, inputJsonPath);
   const command = formatCommand(request.command, args);
+  let env: NodeJS.ProcessEnv;
+  try {
+    env = internalEnvFor(process.env, "strict_research", request.runId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      succeeded: false,
+      reportPath: researchRunReportPath(request.cwd, request.runId),
+      failureReason: message,
+      command
+    };
+  }
   const result = spawnSync(request.command, args, {
     cwd: request.cwd,
+    env,
     encoding: "utf8",
     timeout: request.timeoutMs + SPAWN_TIMEOUT_GRACE_MS,
     maxBuffer: MAX_HOOK_COMMAND_BUFFER
@@ -139,7 +209,7 @@ export function defaultStrictResearchRunner(request: StrictResearchRequest): Str
     : result.error
       ? result.error.message
       : result.status !== 0
-        ? `strict research command exited with status ${result.status ?? "unknown"}: ${stderr.trim() || stdout.trim() || "no output"}`
+        ? `strict research command exited with status ${result.status ?? "unknown"}: ${sanitizeOutput(stderr) || sanitizeOutput(stdout) || "no output"}`
         : report?.status === "failed"
           ? report.failure_reason || "strict research report status=failed without failure_reason."
           : !report
@@ -152,8 +222,8 @@ export function defaultStrictResearchRunner(request: StrictResearchRequest): Str
     failureReason,
     timedOut,
     status: result.status,
-    stdout,
-    stderr,
+    stdout: sanitizeOutput(stdout),
+    stderr: sanitizeOutput(stderr),
     command
   };
 }

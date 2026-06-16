@@ -6,7 +6,7 @@ import type { TriggerSource } from "./schemas.js";
 
 export const HOOK_AUDIT_VERSION = "programmatic-trigger-v1";
 
-export type HookEventName = "UserPromptSubmit" | "Stop" | "CLI";
+export type HookEventName = "UserPromptSubmit" | "Stop" | "CLI" | "UserPromptSubmitInternalBypass" | "StopInternalBypass";
 
 export interface HookAuditEvent {
   eventName: HookEventName;
@@ -22,6 +22,10 @@ export interface HookAuditEvent {
   decision?: string;
   reason?: string;
   command?: string;
+  internalPurpose?: string;
+  parentRunId?: string;
+  recursionDepth?: number;
+  recursionLimitHit?: boolean;
 }
 
 function stateHookEventsPath(cwd: string): string {
@@ -92,6 +96,17 @@ function summarizeRunOwnedHookEvents(cwd: string): RunOwnedHookEventsSummary {
   return { runOwnedEventCount, latestRunOwnedEventPath, latestRunOwnedRunId };
 }
 
+function summarizeRunOwnedHookEventsList(cwd: string): HookAuditEvent[] {
+  const runsDir = researchRunsDir(resolve(cwd));
+  if (!existsSync(runsDir)) return [];
+  const events: HookAuditEvent[] = [];
+  for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    events.push(...readHookEventsFile(researchRunHookEventsPath(cwd, entry.name)));
+  }
+  return events;
+}
+
 export function findMarkerByRunId(cwd: string, runId: string): HookMarker | null {
   const root = join(hardflowStateDir(), repoHash(resolve(cwd)));
   if (!existsSync(root)) return null;
@@ -129,6 +144,13 @@ export function hookStatus(cwd: string, runId?: string): Record<string, unknown>
   const warning =
     globalEventCount === 0 && runOwned.runOwnedEventCount > 0 ? "Run-owned hook events exist; global event count alone is not sufficient." : undefined;
   const marker = runId ? findMarkerByRunId(cwd, runId) : null;
+  const allEvents = runId ? events : [...globalEvents, ...summarizeRunOwnedHookEventsList(resolvedCwd)];
+  const internalEvents = allEvents.filter((event) => event.eventName === "UserPromptSubmitInternalBypass" || event.eventName === "StopInternalBypass");
+  const internalPurposeCounts = internalEvents.reduce<Record<string, number>>((counts, event) => {
+    const key = event.internalPurpose ?? "unknown";
+    counts[key] = (counts[key] ?? 0) + 1;
+    return counts;
+  }, {});
   return {
     runId,
     eventsPath: eventPath(resolvedCwd, runId),
@@ -138,6 +160,10 @@ export function hookStatus(cwd: string, runId?: string): Record<string, unknown>
     latestRunOwnedEventPath: runOwned.latestRunOwnedEventPath,
     latestRunOwnedRunId: runOwned.latestRunOwnedRunId,
     warning,
+    internalBypassCount: internalEvents.length,
+    internalPurposeCounts,
+    recursionDepth: internalEvents.reduce((max, event) => Math.max(max, event.recursionDepth ?? 0), 0),
+    recursionLimitHit: internalEvents.some((event) => event.recursionLimitHit === true),
     events,
     marker: marker
       ? {

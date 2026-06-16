@@ -2,7 +2,8 @@ import { absoluteCommandFor } from "../cliPaths.js";
 import { DEFAULT_TRIGGER_RUNTIME_CONFIG, type TriggerRuntimeConfig } from "../config.js";
 import { appendHookEvent, hashAdditionalContext } from "../hookEvents.js";
 import { createHookMarker, updateMarker, type HookMarker } from "../hookState.js";
-import { defaultRoutePreflightRunner, formatCommand, routeCommandArgs, strictResearchCommandArgs, type RoutePreflightResult, type RoutePreflightRunner } from "./hookAutomation.js";
+import { hardflowInternalContext } from "../internalEnv.js";
+import { defaultRoutePreflightRunner, formatCommand, routeCommandArgs, strictResearchCommandArgs, writeHookInputJson, type RoutePreflightResult, type RoutePreflightRunner } from "./hookAutomation.js";
 import { researchRunRouterTracePath } from "../paths.js";
 import { DEFAULT_AVAILABLE_AGENTS } from "../router/routerPrompt.js";
 import type { RouterTrace } from "../router/routerSchema.js";
@@ -51,14 +52,16 @@ function buildAdditionalContext(params: {
   routerTracePath: string;
   routeCommand: string;
   strictResearchCommand: string;
+  hookInputPath: string;
   routeResult?: RoutePreflightResult;
   agentNames: string;
 }): string {
-  const { marker, prompt, absoluteCommand, routerTracePath, routeCommand, strictResearchCommand, routeResult, agentNames } = params;
+  const { marker, prompt, absoluteCommand, routerTracePath, routeCommand, strictResearchCommand, hookInputPath, routeResult, agentNames } = params;
   const trace = routeResult?.trace;
   const base = [
     `codex-hardflow UserPromptSubmit created marker and ran router preflight programmatically. Hook command fallback: ${absoluteCommand}. Prefer this absolute command even if shell PATH can find codex-hardflow; app PATH may differ.`,
     `Hardflow marker: turnId=${marker.turnId}, runId=${marker.runId}, promptHash=${marker.promptHash}, createdAt=${marker.createdAt}, expiresAt=${marker.expiresAt}, routeStatus=${marker.routeStatus ?? "unknown"}. Stop gate must use marker.runId plus router_trace/routerOutput, not keyword reclassification.`,
+    `Hook input path: ${hookInputPath}. Commands must pass --input-json instead of embedding the raw prompt in argv.`,
     `Router trace path: ${routerTracePath}. Router preflight result: ${routeDescription(trace)}.`,
     "Router inferred user intent semantically, not by keyword matching; do not use keyword fallback.",
     `Route retry command if explicitly needed: ${routeCommand}.`,
@@ -108,11 +111,33 @@ function buildAdditionalContext(params: {
 }
 
 export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot = process.cwd(), options: UserPromptSubmitOptions = {}): Record<string, unknown> {
+  const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
+  const internal = hardflowInternalContext();
+  if (internal.internal) {
+    appendHookEvent(cwd, {
+      eventName: "UserPromptSubmitInternalBypass",
+      runId: internal.parentRunId,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: false,
+      internalPurpose: internal.purpose,
+      parentRunId: internal.parentRunId,
+      recursionDepth: internal.depth,
+      recursionLimitHit: internal.recursionLimitHit,
+      decision: "allow",
+      reason: "CODEX_HARDFLOW_INTERNAL bypass"
+    });
+    return {
+      decision: "allow",
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmitInternalBypass",
+        additionalContext: ""
+      }
+    };
+  }
   const prompt = String(input.prompt ?? input.user_prompt ?? input.message ?? "");
   if (!prompt.trim()) return allowOutput();
   const config = configWithDefaults(options.config);
 
-  const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
   let marker = createHookMarker({
     cwd,
     prompt,
@@ -130,8 +155,16 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
   const absoluteCommand = absoluteCommandFor(sourceRoot);
   const agentNames = DEFAULT_AVAILABLE_AGENTS.map((agent) => agent.name).join(", ");
   const routerTracePath = researchRunRouterTracePath(cwd, marker.runId);
-  const routeCommand = formatCommand(absoluteCommand, routeCommandArgs(marker.runId, prompt, config.routePreflightTimeoutMs));
-  const strictResearchCommand = formatCommand(absoluteCommand, strictResearchCommandArgs(marker.runId, prompt));
+  const hookInputPath = writeHookInputJson(cwd, marker.runId, {
+    runId: marker.runId,
+    rawUserPrompt: prompt,
+    turnId: marker.turnId,
+    cwd,
+    sourceRoot,
+    triggerSource: "hook_user_prompt_submit"
+  });
+  const routeCommand = formatCommand(absoluteCommand, routeCommandArgs(marker.runId, prompt, config.routePreflightTimeoutMs, hookInputPath));
+  const strictResearchCommand = formatCommand(absoluteCommand, strictResearchCommandArgs(marker.runId, prompt, hookInputPath));
   let routeResult: RoutePreflightResult | undefined;
 
   if (config.autoRouteOnUserPromptSubmit) {
@@ -141,7 +174,10 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
       command: absoluteCommand,
       runId: marker.runId,
       rawUserPrompt: prompt,
-      timeoutMs: config.routePreflightTimeoutMs
+      timeoutMs: config.routePreflightTimeoutMs,
+      turnId: marker.turnId,
+      inputJsonPath: hookInputPath,
+      triggerSource: "hook_user_prompt_submit"
     });
     marker = updateMarker(marker, markerPatchFromRouteResult(routeResult));
   }
@@ -153,6 +189,7 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
     routerTracePath,
     routeCommand,
     strictResearchCommand,
+    hookInputPath,
     routeResult,
     agentNames
   });

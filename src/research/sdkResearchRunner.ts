@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { dirname, join } from "node:path";
 import { Codex, type Thread, type ThreadEvent } from "@openai/codex-sdk";
 import { addEvidence } from "../coverage/evidenceLedger.js";
+import { withHardflowInternalEnvSync } from "../internalEnv.js";
 import type { CoveragePlan } from "../coverage/coveragePlan.js";
 import {
   researchRunSdkThreadsDir,
@@ -929,30 +930,36 @@ async function runStepWithControl(
 
   try {
     const result = await Promise.race([
-      runner({
-        runId: options.runId,
-        cwd: options.cwd,
-        bucket: state.bucket,
-        step,
-        prompt,
-        threadId: state.threadId || undefined,
-        signal: controller.signal,
-        onHeartbeat: (currentStep) => {
-          updateHeartbeat(options.cwd, state, currentStep, workerLeaseMs);
-        },
-        onStreamEvent: (eventType) => {
-          recordActivityProgress(options.cwd, state, `stream event: ${eventType}`, workerLeaseMs, true, false);
-        },
-        onToolActivity: (eventType) => {
-          recordActivityProgress(options.cwd, state, `tool activity: ${eventType}`, workerLeaseMs, false, true);
-        },
-        onThreadId: (threadId) => {
-          if (threadId && threadId !== state.threadId) {
-            recordThreadId(state, threadId, replacementThread);
-            writeSdkWorkerState(options.cwd, state);
-          }
-        }
-      }),
+      withHardflowInternalEnvSync(
+        "sdk_worker",
+        options.runId,
+        () =>
+          runner({
+            runId: options.runId,
+            cwd: options.cwd,
+            bucket: state.bucket,
+            step,
+            prompt,
+            threadId: state.threadId || undefined,
+            signal: controller.signal,
+            onHeartbeat: (currentStep) => {
+              updateHeartbeat(options.cwd, state, currentStep, workerLeaseMs);
+            },
+            onStreamEvent: (eventType) => {
+              recordActivityProgress(options.cwd, state, `stream event: ${eventType}`, workerLeaseMs, true, false);
+            },
+            onToolActivity: (eventType) => {
+              recordActivityProgress(options.cwd, state, `tool activity: ${eventType}`, workerLeaseMs, false, true);
+            },
+            onThreadId: (threadId) => {
+              if (threadId && threadId !== state.threadId) {
+                recordThreadId(state, threadId, replacementThread);
+                writeSdkWorkerState(options.cwd, state);
+              }
+            }
+          }),
+        { incrementDepth: false }
+      ),
       stopPromise
     ]);
     if (typeof result === "string") return result;

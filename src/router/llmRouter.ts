@@ -119,7 +119,13 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 export async function runLlmRouter(input: RouterInput, options: LlmRouterOptions): Promise<{ output: RouterOutput; trace: RouterTrace }> {
   const prompt = buildRouterPrompt(input);
-  const runner = options.promptRunner ?? ((routerPrompt: string, cwd: string) => runIsolatedCodexPrompt(routerPrompt, cwd, true));
+  const runner =
+    options.promptRunner ??
+    ((routerPrompt: string, cwd: string) =>
+      runIsolatedCodexPrompt(routerPrompt, cwd, true, {
+        purpose: "router",
+        parentRunId: input.currentRunId ?? "router"
+      }));
   const repairRunner = options.repairPromptRunner ?? runner;
   let output: RouterOutput;
   let routerMode: RouterMode = "llm";

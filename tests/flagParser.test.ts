@@ -59,6 +59,15 @@ describe("typed CLI flag parser", () => {
     expect(parsed.flags["with-agents-docs"]).toBe(true);
   });
 
+  it("parses input-json and stdin-json flags", () => {
+    const fromFile = parseFlagArgs(["--run-id", "run-a", "--input-json", "/tmp/hook_input.json"]);
+    expect(fromFile.flags["run-id"]).toBe("run-a");
+    expect(fromFile.flags["input-json"]).toBe("/tmp/hook_input.json");
+
+    const fromStdin = parseFlagArgs(["--stdin-json"]);
+    expect(fromStdin.flags["stdin-json"]).toBe(true);
+  });
+
   it("fails unknown flags clearly", () => {
     expect(() => parseFlagArgs(["--unknown", "task text"])).toThrow("Unknown flag: --unknown");
   });

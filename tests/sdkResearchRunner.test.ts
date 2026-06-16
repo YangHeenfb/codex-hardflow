@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildCoveragePlan, type CoveragePlan } from "../src/coverage/coveragePlan.js";
 import { listEvidence } from "../src/coverage/evidenceLedger.js";
 import { evaluateCoverage } from "../src/coverageEval.js";
@@ -16,6 +16,16 @@ import { listResearchWorkers, resumeResearchRun, runResearch } from "../src/rese
 import { classifySdkWorkerError, runSdkResearchPool, type SdkResearchStepRunner, type SdkResearchPoolOptions } from "../src/research/sdkResearchRunner.js";
 import type { ResearchSource, SdkWorkerState, SourceCoverageMatrix, WorkerFailureCategory } from "../src/schemas.js";
 import { broadResearchRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
+
+function clearInternalEnv(): void {
+  delete process.env.CODEX_HARDFLOW_INTERNAL;
+  delete process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE;
+  delete process.env.CODEX_HARDFLOW_PARENT_RUN_ID;
+  delete process.env.CODEX_HARDFLOW_INTERNAL_DEPTH;
+}
+
+beforeEach(clearInternalEnv);
+afterEach(clearInternalEnv);
 
 function tempRepo(prefix = "hardflow-sdk-"): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));

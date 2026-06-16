@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readHookEvents } from "../src/hookEvents.js";
 import { createHookMarker, markerPathFor, updateMarker, type HookMarker } from "../src/hookState.js";
 import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
@@ -93,9 +94,18 @@ function directRouterOutput() {
 }
 
 describe("hook marker Stop gate", () => {
+  function clearInternalEnv(): void {
+    delete process.env.CODEX_HARDFLOW_INTERNAL;
+    delete process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE;
+    delete process.env.CODEX_HARDFLOW_PARENT_RUN_ID;
+    delete process.env.CODEX_HARDFLOW_INTERNAL_DEPTH;
+  }
+
   beforeEach(() => {
     process.env.CODEX_HARDFLOW_HOME = mkdtempSync(join(tmpdir(), "hardflow-state-"));
+    clearInternalEnv();
   });
+  afterEach(clearInternalEnv);
 
   it("UserPromptSubmit writes a turn-scoped marker with the required schema", () => {
     const cwd = tempRepo();
@@ -152,6 +162,20 @@ describe("hook marker Stop gate", () => {
     const second = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: failingRouteRunner("router unavailable") });
     expect(second.decision).toBe("block");
     expect(second.hardflowStatus).toBe("router_failed_fail_closed");
+  });
+
+  it("Stop bypasses internal SDK/router calls without enforcing gates", () => {
+    const cwd = tempRepo();
+    process.env.CODEX_HARDFLOW_INTERNAL = "1";
+    process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE = "sdk_worker";
+    process.env.CODEX_HARDFLOW_PARENT_RUN_ID = "run-parent";
+    process.env.CODEX_HARDFLOW_INTERNAL_DEPTH = "1";
+
+    const result = stopValidationGate({ cwd, turnId: "turn-internal-stop" });
+
+    expect(result.decision).toBe("allow");
+    expect(result.hardflowStatus).toBe("internal_bypass");
+    expect(readHookEvents(cwd, "run-parent").some((event) => event.eventName === "StopInternalBypass" && event.internalPurpose === "sdk_worker")).toBe(true);
   });
 
   it("auto-routes missing router_trace to direct_answer and allows", () => {

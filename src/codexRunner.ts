@@ -1,5 +1,6 @@
 import { Codex, Thread } from "@openai/codex-sdk";
 import { SDK_VERSION } from "./config.js";
+import { withHardflowInternalEnvSync, type HardflowInternalPurpose } from "./internalEnv.js";
 
 export interface CodexRunnerStatus {
   sdkVersion: string;
@@ -15,14 +16,22 @@ export function codexRunnerStatus(): CodexRunnerStatus {
   };
 }
 
-export async function runIsolatedCodexPrompt(prompt: string, cwd: string, readOnly = true): Promise<string> {
-  const codex = new Codex();
-  const thread = codex.startThread({
-    workingDirectory: cwd,
-    sandboxMode: readOnly ? "read-only" : "workspace-write",
-    webSearchMode: "live",
-    approvalPolicy: "never"
+export async function runIsolatedCodexPrompt(
+  prompt: string,
+  cwd: string,
+  readOnly = true,
+  internal: { purpose: HardflowInternalPurpose; parentRunId: string } = { purpose: "router", parentRunId: "router" }
+): Promise<string> {
+  const resultPromise = withHardflowInternalEnvSync(internal.purpose, internal.parentRunId, () => {
+    const codex = new Codex();
+    const thread = codex.startThread({
+      workingDirectory: cwd,
+      sandboxMode: readOnly ? "read-only" : "workspace-write",
+      webSearchMode: "live",
+      approvalPolicy: "never"
+    });
+    return thread.run(prompt);
   });
-  const result = await thread.run(prompt);
+  const result = await resultPromise;
   return result.finalResponse;
 }

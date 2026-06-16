@@ -51,7 +51,8 @@ import type {
   ResearchRequestUrgency,
   ResearchRunnerMode,
   ResearchSource,
-  SubagentReportStatus
+  SubagentReportStatus,
+  TriggerSource
 } from "./schemas.js";
 import { validate } from "./validationOrchestrator.js";
 
@@ -62,6 +63,12 @@ const cliEntrypointUsed = fileURLToPath(import.meta.url);
 
 function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function exitAfterInternalCommand(): void {
+  if (process.env.CODEX_HARDFLOW_INTERNAL !== "1") return;
+  const code = process.exitCode ?? 0;
+  process.stdout.write("", () => process.exit(code));
 }
 
 function stringFlag(flags: ParsedFlags, key: string, required = false): string | undefined {
@@ -140,6 +147,14 @@ function routerOwnerFlag(value: string | undefined): RouterTraceOwner {
   throw new Error(`Invalid --owner: ${value}`);
 }
 
+function triggerSourceValue(value: string | undefined): TriggerSource | undefined {
+  if (value === undefined) return undefined;
+  if (value === "hook_user_prompt_submit" || value === "cli_command" || value === "manual_user_request" || value === "agents_md_only" || value === "skill_only" || value === "unknown") {
+    return value;
+  }
+  return undefined;
+}
+
 async function readStdinJson(): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
@@ -155,6 +170,15 @@ async function readStdinJson(): Promise<Record<string, unknown>> {
 async function readOptionalStdinJson(): Promise<Record<string, unknown>> {
   if (process.stdin.isTTY) return {};
   return readStdinJson();
+}
+
+async function readCommandInputJson(flags: ParsedFlags): Promise<Record<string, unknown>> {
+  const inputPath = stringFlag(flags, "input-json");
+  const useStdin = booleanFlag(flags, "stdin-json");
+  if (inputPath && useStdin) throw new Error("--input-json conflicts with --stdin-json.");
+  if (inputPath) return JSON.parse(readFileSync(inputPath, "utf8")) as Record<string, unknown>;
+  if (useStdin) return readStdinJson();
+  return {};
 }
 
 function stringField(input: Record<string, unknown>, keys: string[]): string | undefined {
@@ -312,32 +336,38 @@ async function main(): Promise<void> {
         return;
       case "route": {
         const parsed = parseFlagArgs(args);
-        const task = parsed.rest.join(" ");
-        if (!task) throw new Error("Usage: codex-hardflow route [--owner parent|subagent] \"task...\"");
-        const runId = stringFlag(parsed.flags, "run-id");
+        const inputJson = await readCommandInputJson(parsed.flags);
+        const taskArg = parsed.rest.join(" ");
+        const rawUserPrompt = stringFlag(parsed.flags, "raw-user-prompt") ?? stringField(inputJson, ["rawUserPrompt", "raw_user_prompt", "prompt", "message"]) ?? taskArg;
+        const task = taskArg || stringField(inputJson, ["normalizedTask", "normalized_task", "task"]) || rawUserPrompt;
+        if (!rawUserPrompt) throw new Error("Usage: codex-hardflow route [--owner parent|subagent] [--input-json <path>] \"task...\"");
+        const runId = stringFlag(parsed.flags, "run-id") ?? stringField(inputJson, ["runId", "run_id"]);
         const owner = routerOwnerFlag(stringFlag(parsed.flags, "owner"));
         const parentRunId = stringFlag(parsed.flags, "parent-run-id");
         const subagentName = stringFlag(parsed.flags, "subagent-name");
         const bucket = stringFlag(parsed.flags, "bucket");
         const writeTrace = Object.hasOwn(parsed.flags, "write-trace") ? booleanFlag(parsed.flags, "write-trace") : Boolean(runId) || Boolean(parentRunId);
+        const inputCwd = stringField(inputJson, ["cwd"]) ?? cwd;
+        const turnId = stringFlag(parsed.flags, "turn-id") ?? stringField(inputJson, ["turnId", "turn_id"]);
+        const triggerSource = triggerSourceValue(stringField(inputJson, ["triggerSource", "trigger_source"])) ?? "cli_command";
         const result = await runLlmRouter(
           {
-            rawUserPrompt: stringFlag(parsed.flags, "raw-user-prompt") ?? task,
+            rawUserPrompt,
             normalizedTask: task,
             currentRunId: runId,
-            triggerSource: "cli_command",
+            triggerSource,
             programmaticTrigger: true
           },
           {
-            cwd,
+            cwd: inputCwd,
             timeoutMs: numberFlag(parsed.flags, "timeout"),
-            turnId: stringFlag(parsed.flags, "turn-id"),
+            turnId,
             writeTrace,
             owner,
             parentRunId,
             subagentName,
             bucket,
-            triggerSource: "cli_command",
+            triggerSource,
             programmaticTrigger: true
           }
         );
@@ -353,6 +383,7 @@ async function main(): Promise<void> {
           });
         }
         printJson(result.trace);
+        exitAfterInternalCommand();
         return;
       }
       case "research": {
@@ -449,8 +480,13 @@ async function main(): Promise<void> {
           return;
         }
         const parsed = parseFlagArgs(args);
-        const task = parsed.rest.join(" ");
-        if (!task) throw new Error("Usage: codex-hardflow research \"task...\"");
+        const inputJson = await readCommandInputJson(parsed.flags);
+        const taskArg = parsed.rest.join(" ");
+        const rawUserPrompt = stringFlag(parsed.flags, "raw-user-prompt") ?? stringField(inputJson, ["rawUserPrompt", "raw_user_prompt", "prompt", "message"]) ?? taskArg;
+        const task = taskArg || stringField(inputJson, ["normalizedTask", "normalized_task", "task"]) || rawUserPrompt;
+        if (!rawUserPrompt) throw new Error("Usage: codex-hardflow research [--input-json <path>] \"task...\"");
+        const inputCwd = stringField(inputJson, ["cwd"]) ?? cwd;
+        const turnId = stringFlag(parsed.flags, "turn-id") ?? stringField(inputJson, ["turnId", "turn_id"]);
         const requestedRunner = stringFlag(parsed.flags, "runner");
         if (!validRunnerMode(requestedRunner)) {
           if (requestedRunner) throw new Error(`Invalid --runner: ${requestedRunner}`);
@@ -465,33 +501,34 @@ async function main(): Promise<void> {
           ? "strict_programmatic"
           : executeSdkResearch
             ? "sdk_threads"
-          : validRunnerMode(requestedRunner)
-            ? requestedRunner
-            : undefined;
-        printJson(
-          await runResearch(task, cwd, {
-            sourceRoot,
-            rawUserPrompt: stringFlag(parsed.flags, "raw-user-prompt") ?? task,
-            normalizedTask: task,
-            runId: stringFlag(parsed.flags, "run-id"),
-            runnerMode,
-            executeSdkResearch,
-            strictProgrammatic,
-            coverageMode: coverageModeFlag(stringFlag(parsed.flags, "coverage-mode")),
-            parallelPolicy: parallelPolicyFlag(stringFlag(parsed.flags, "parallel-policy")),
-            runRouter: booleanFlag(parsed.flags, "run-router"),
-            maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
-            workerLeaseMs: numberFlag(parsed.flags, "worker-lease"),
-            softTimeoutMs: numberFlag(parsed.flags, "soft-timeout"),
-            hardTimeoutMs: numberFlag(parsed.flags, "hard-timeout"),
-            perBucketTimeoutMs: numberFlag(parsed.flags, "per-bucket-timeout"),
-            globalBudgetMs: numberFlag(parsed.flags, "global-budget"),
-            heartbeatIntervalMs: numberFlag(parsed.flags, "heartbeat-interval"),
-            maxNoProgressHeartbeats: numberFlag(parsed.flags, "max-no-progress-heartbeats"),
-            maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
-            progress: runnerMode === "sdk_threads" || runnerMode === "strict_programmatic" ? sdkProgress : undefined
-          })
-        );
+            : validRunnerMode(requestedRunner)
+              ? requestedRunner
+              : undefined;
+        const report = await runResearch(task, inputCwd, {
+          sourceRoot,
+          rawUserPrompt,
+          normalizedTask: task,
+          runId: stringFlag(parsed.flags, "run-id") ?? stringField(inputJson, ["runId", "run_id"]),
+          runnerMode,
+          executeSdkResearch,
+          strictProgrammatic,
+          coverageMode: coverageModeFlag(stringFlag(parsed.flags, "coverage-mode")),
+          parallelPolicy: parallelPolicyFlag(stringFlag(parsed.flags, "parallel-policy")),
+          runRouter: booleanFlag(parsed.flags, "run-router"),
+          maxConcurrentBuckets: numberFlag(parsed.flags, "max-concurrent"),
+          workerLeaseMs: numberFlag(parsed.flags, "worker-lease"),
+          softTimeoutMs: numberFlag(parsed.flags, "soft-timeout"),
+          hardTimeoutMs: numberFlag(parsed.flags, "hard-timeout"),
+          perBucketTimeoutMs: numberFlag(parsed.flags, "per-bucket-timeout"),
+          globalBudgetMs: numberFlag(parsed.flags, "global-budget"),
+          heartbeatIntervalMs: numberFlag(parsed.flags, "heartbeat-interval"),
+          maxNoProgressHeartbeats: numberFlag(parsed.flags, "max-no-progress-heartbeats"),
+          maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
+          progress: runnerMode === "sdk_threads" || runnerMode === "strict_programmatic" ? sdkProgress : undefined,
+          input: { ...inputJson, turnId }
+        });
+        printJson(report);
+        exitAfterInternalCommand();
         return;
       }
       case "report": {
@@ -762,6 +799,7 @@ async function main(): Promise<void> {
   } catch (error) {
     printJson({ error: error instanceof Error ? error.message : String(error) });
     process.exitCode = 1;
+    exitAfterInternalCommand();
   }
 }
 

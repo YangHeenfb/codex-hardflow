@@ -5,6 +5,7 @@ import type { CodexDefaultDiscoveryStatus, ResearchAgentRun, ResearchBucketStatu
 import { sanitizeText } from "../sanitizer.js";
 import { incrementBlockCount, markerExpired, resolveCurrentMarker, updateMarker, type HookMarker } from "../hookState.js";
 import { appendHookEvent, assertHookActive } from "../hookEvents.js";
+import { hardflowInternalContext } from "../internalEnv.js";
 import { assertResearchReportEvidence } from "../researchOrchestrator.js";
 import { listEvidence } from "../coverage/evidenceLedger.js";
 import { blockingResearchRequests, failedBlockingResearchRequests, listResearchRequests } from "../research/researchRequest.js";
@@ -233,6 +234,29 @@ function validateAutomaticStrictResearchArtifacts(cwd: string, report: ResearchR
 
 export function stopValidationGate(input: Record<string, unknown> = {}, options: StopValidationGateOptions = {}): Record<string, unknown> {
   const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
+  const internal = hardflowInternalContext();
+  if (internal.internal) {
+    appendHookEvent(cwd, {
+      eventName: "StopInternalBypass",
+      runId: internal.parentRunId,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: false,
+      internalPurpose: internal.purpose,
+      parentRunId: internal.parentRunId,
+      recursionDepth: internal.depth,
+      recursionLimitHit: internal.recursionLimitHit,
+      decision: "allow",
+      reason: "CODEX_HARDFLOW_INTERNAL bypass"
+    });
+    return {
+      decision: "allow",
+      hardflowStatus: "internal_bypass",
+      internalPurpose: internal.purpose,
+      parentRunId: internal.parentRunId,
+      recursionDepth: internal.depth,
+      recursionLimitHit: internal.recursionLimitHit
+    };
+  }
   const resolvedMarker = resolveCurrentMarker(input, cwd);
   if (!resolvedMarker) return { decision: "allow" };
   let marker: HookMarker = resolvedMarker;
@@ -272,7 +296,9 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
       command: marker.absoluteCommand,
       runId: marker.runId,
       rawUserPrompt,
-      timeoutMs: config.routePreflightTimeoutMs
+      timeoutMs: config.routePreflightTimeoutMs,
+      turnId: marker.turnId,
+      triggerSource: "stop_hook"
     });
     marker = updateMarker(marker, {
       routeStatus: result.succeeded ? "routed" : "router_failed",
@@ -304,7 +330,8 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
       command: marker.absoluteCommand,
       runId: marker.runId,
       rawUserPrompt,
-      timeoutMs: config.strictResearchStopTimeoutMs
+      timeoutMs: config.strictResearchStopTimeoutMs,
+      turnId: marker.turnId
     });
     if (!result.succeeded) {
       marker = updateMarker(marker, { strictResearchStopFailureReason: result.failureReason ?? "strict research failed without a failure reason." });

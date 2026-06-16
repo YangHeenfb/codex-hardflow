@@ -17,7 +17,8 @@ const BOOLEAN_FLAGS = new Set([
   "materialize-dry-run",
   "with-skill",
   "with-app-agents",
-  "with-agents-docs"
+  "with-agents-docs",
+  "stdin-json"
 ]);
 
 const STRING_FLAGS = new Set([
@@ -27,6 +28,7 @@ const STRING_FLAGS = new Set([
   "repeats",
   "run-id",
   "run-id-prefix",
+  "input-json",
   "mode",
   "runner",
   "owner",
