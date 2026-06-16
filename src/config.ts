@@ -16,6 +16,24 @@ export const DEFAULT_LOOP_CONFIG: LoopConfig = {
   stop_on_suspected_cheating: true
 };
 
+export interface TriggerRuntimeConfig {
+  autoRouteOnUserPromptSubmit: boolean;
+  routePreflightTimeoutMs: number;
+  stopAutoRouteFallback: boolean;
+  autoRunStrictResearchInStop: boolean;
+  strictResearchStopTimeoutMs: number;
+  allowQuickAnswerBypass: boolean;
+}
+
+export const DEFAULT_TRIGGER_RUNTIME_CONFIG: TriggerRuntimeConfig = {
+  autoRouteOnUserPromptSubmit: true,
+  routePreflightTimeoutMs: 45_000,
+  stopAutoRouteFallback: true,
+  autoRunStrictResearchInStop: true,
+  strictResearchStopTimeoutMs: 1_800_000,
+  allowQuickAnswerBypass: true
+};
+
 export function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
@@ -213,7 +231,7 @@ export function buildGlobalHooksConfig(sourceRoot: string): GlobalHooksConfig {
     hooks: {
       UserPromptSubmit: [
         {
-          hooks: [hookHandler(`${bin} hook user-prompt-submit`, "Applying codex-hardflow prompt routing")]
+          hooks: [hookHandler(`${bin} hook user-prompt-submit`, "Applying codex-hardflow prompt routing", Math.ceil(DEFAULT_TRIGGER_RUNTIME_CONFIG.routePreflightTimeoutMs / 1000) + 15)]
         }
       ],
       PreToolUse: [
@@ -224,7 +242,7 @@ export function buildGlobalHooksConfig(sourceRoot: string): GlobalHooksConfig {
       ],
       Stop: [
         {
-          hooks: [hookHandler(`${bin} hook stop-validation-gate`, "Checking hardflow validation gate")]
+          hooks: [hookHandler(`${bin} hook stop-validation-gate`, "Checking hardflow validation gate", Math.ceil(DEFAULT_TRIGGER_RUNTIME_CONFIG.strictResearchStopTimeoutMs / 1000) + 60)]
         }
       ],
       SubagentStart: [

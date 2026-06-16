@@ -11,6 +11,7 @@ import { addManualSourceToReport, buildResearchReport, runResearch } from "../sr
 import { currentResearchReportPath, legacyResearchReportPath, repoHash, researchRunEvidenceLedgerPath, researchRunReportPath } from "../src/paths.js";
 import { broadResearchRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
 import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
+import { failingRouteRunner, fakeRouteRunner, fakeStrictResearchRunner } from "./hookTestUtils.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-hook-"));
@@ -73,11 +74,22 @@ function automaticResearchMarker(cwd: string, prompt: string, turnId: string): H
     requiresValidation: false,
     triggerSource: "hook_user_prompt_submit",
     programmaticTrigger: true,
-    routeStatus: "router_required",
+    routeStatus: "routed",
     input: { turnId }
   });
   writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId }, broadResearchRouterOutput, "llm", undefined, marker.turnId));
   return marker;
+}
+
+function directRouterOutput() {
+  return routerOutputForBuckets([], {
+    route: "direct_answer",
+    workflowPattern: "direct",
+    researchProfile: "none",
+    requiresSourceMatrix: false,
+    reasons: ["Direct answer."],
+    risks: []
+  });
 }
 
 describe("hook marker Stop gate", () => {
@@ -94,7 +106,8 @@ describe("hook marker Stop gate", () => {
         turnId: "turn-schema",
         sessionId: "thread-schema"
       },
-      process.cwd()
+      process.cwd(),
+      { routeRunner: fakeRouteRunner(broadResearchRouterOutput) }
     );
 
     expect(result.decision).toBe("allow");
@@ -109,28 +122,107 @@ describe("hook marker Stop gate", () => {
     expect(marker.requiresSourceMatrix).toBe(false);
     expect(marker.runId).toBe("run-turn-schema");
     expect(marker.maxBlocks).toBe(2);
-    expect(marker.routeStatus).toBe("router_required");
+    expect(marker.routeStatus).toBe("routed");
     expect(marker.routerBlockCount).toBe(0);
+    expect(marker.routerPreflightSource).toBe("user_prompt_submit");
+    expect(marker.routerPreflightSucceeded).toBe(true);
+    expect(marker.routerRoute).toBe("research");
   });
 
-  it("blocks router_required UserPromptSubmit markers once when router_trace is missing", () => {
+  it("fails closed when router_required marker has no router_trace and fallback fails", () => {
     const cwd = tempRepo();
-    userPromptSubmit(
-      {
-        cwd,
-        prompt: "research current AI coding agent hidden validation sandbox evaluation framework",
-        turnId: "turn-router-required"
-      },
-      process.cwd()
+    const marker = createHookMarker({
+      cwd,
+      prompt: "research current AI coding agent hidden validation sandbox evaluation framework",
+      sourceRoot: process.cwd(),
+      taskType: "router-preflight",
+      requiresSourceMatrix: false,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: true,
+      routeStatus: "router_required",
+      input: { turnId: "turn-router-required" }
+    });
+
+    const first = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: failingRouteRunner("router unavailable") });
+    expect(first.decision).toBe("block");
+    expect(String(first.reason)).toContain("fails closed");
+
+    const second = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: failingRouteRunner("router unavailable") });
+    expect(second.decision).toBe("block");
+    expect(second.hardflowStatus).toBe("router_failed_fail_closed");
+  });
+
+  it("auto-routes missing router_trace to direct_answer and allows", () => {
+    const cwd = tempRepo();
+    const marker = createHookMarker({
+      cwd,
+      prompt: "translate hello to Chinese",
+      sourceRoot: process.cwd(),
+      taskType: "router-preflight",
+      requiresSourceMatrix: false,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: true,
+      routeStatus: "router_required",
+      input: { turnId: "turn-auto-route-direct" }
+    });
+
+    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: fakeRouteRunner(directRouterOutput()) });
+
+    expect(result.decision).toBe("allow");
+    expect(String(result.notice)).toContain("direct_answer");
+  });
+
+  it("auto-routes missing router_trace to research and auto-runs strict research", () => {
+    const cwd = tempRepo();
+    const marker = createHookMarker({
+      cwd,
+      prompt: "What are current practical solutions for agentic long horizon work? 中文回答",
+      sourceRoot: process.cwd(),
+      taskType: "router-preflight",
+      requiresSourceMatrix: false,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: true,
+      routeStatus: "router_required",
+      input: { turnId: "turn-auto-route-research" }
+    });
+
+    const result = stopValidationGate(
+      { cwd, turnId: marker.turnId },
+      { routeRunner: fakeRouteRunner(broadResearchRouterOutput), strictResearchRunner: fakeStrictResearchRunner("completed") }
     );
 
-    const first = stopValidationGate({ cwd, turnId: "turn-router-required" });
-    expect(first.decision).toBe("block");
-    expect(String(first.reason)).toContain("router_trace");
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("strict_research_auto_run_completed");
+  });
 
-    const second = stopValidationGate({ cwd, turnId: "turn-router-required" });
-    expect(second.decision).toBe("allow");
-    expect(second.hardflowStatus).toBe("router_required_missing_after_one_block");
+  it("fails closed for router_failed markers", () => {
+    const cwd = tempRepo();
+    const marker = createHookMarker({
+      cwd,
+      prompt: "What are current practical solutions for agentic long horizon work? 中文回答",
+      sourceRoot: process.cwd(),
+      taskType: "router-preflight",
+      requiresSourceMatrix: false,
+      requiresExecutorManifest: false,
+      requiresValidation: false,
+      triggerSource: "hook_user_prompt_submit",
+      programmaticTrigger: true,
+      routeStatus: "router_failed",
+      input: { turnId: "turn-router-failed" }
+    });
+    updateMarker(marker, { routerPreflightFailureReason: "router timed out" });
+
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
+
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("router_failed_fail_closed");
+    expect(String(result.reason)).toContain("router timed out");
   });
 
   it("allows direct_answer routes without research report", () => {
@@ -146,7 +238,7 @@ describe("hook marker Stop gate", () => {
       requiresValidation: false,
       triggerSource: "hook_user_prompt_submit",
       programmaticTrigger: true,
-      routeStatus: "router_required",
+      routeStatus: "routed",
       input: { turnId: "turn-direct-answer" }
     });
     const direct = routerOutputForBuckets([], {
@@ -184,18 +276,26 @@ describe("hook marker Stop gate", () => {
     expect(String(result.reason)).toContain("requires strict_programmatic");
   });
 
-  it("keeps blocking automatic research routes without strict research report", () => {
+  it("auto-runs strict research for automatic research routes without strict report", () => {
     const cwd = tempRepo();
     const marker = automaticResearchMarker(cwd, "What are current practical solutions for agentic long horizon work? 中文回答", "turn-auto-research-missing");
 
-    const first = stopValidationGate({ cwd, turnId: marker.turnId });
-    const second = stopValidationGate({ cwd, turnId: marker.turnId });
-    const third = stopValidationGate({ cwd, turnId: marker.turnId });
+    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { strictResearchRunner: fakeStrictResearchRunner("completed") });
 
-    expect(first.decision).toBe("block");
-    expect(second.decision).toBe("block");
-    expect(third.decision).toBe("block");
-    expect(third.hardflowStatus).toBe("strict_research_report_missing");
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("strict_research_auto_run_completed");
+    expect(String(result.reason)).toContain("Answer only from the generated run-owned research_report");
+  });
+
+  it("blocks ordinary answers when Stop auto-run strict research fails", () => {
+    const cwd = tempRepo();
+    const marker = automaticResearchMarker(cwd, "What are current practical solutions for agentic long horizon work? 中文回答", "turn-auto-research-auto-failed");
+
+    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { strictResearchRunner: fakeStrictResearchRunner("failed") });
+
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("strict_research_report_missing");
+    expect(String(result.reason)).toContain("fake strict research failed");
   });
 
   it("blocks strict-looking research reports without sdk workers", async () => {
@@ -360,7 +460,7 @@ describe("hook marker Stop gate", () => {
     expect(stopValidationGate({ cwd, turnId: completed.turnId }).decision).toBe("allow");
   });
 
-  it("allows after maxBlocks is reached with an explicit failure explanation", () => {
+  it("does not allow missing router_trace after maxBlocks is reached", () => {
     const cwd = tempRepo();
     const marker = createHookMarker({
       cwd,
@@ -374,9 +474,9 @@ describe("hook marker Stop gate", () => {
     });
     updateMarker(marker, { blockCount: marker.maxBlocks });
 
-    const result = stopValidationGate({ cwd, turnId: marker.turnId });
-    expect(result.decision).toBe("allow");
-    expect(result.hardflowStatus).toBe("failed_max_blocks_reached");
+    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: failingRouteRunner("router unavailable") });
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("router_trace_missing_fail_closed");
   });
 
   it("Stop hook reads marker.runId report instead of stale legacy cwd report", async () => {
@@ -418,6 +518,7 @@ describe("hook marker Stop gate", () => {
       requiresValidation: false,
       input: { turnId: "turn-stale-run" }
     });
+    writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId }, broadResearchRouterOutput, "llm", undefined, marker.turnId));
     const stale = buildResearchReport("research stale security architecture", [], "not_configured", {
       runId: "old-run",
       turnId: "old-turn",
@@ -445,6 +546,7 @@ describe("hook marker Stop gate", () => {
       requiresValidation: false,
       input: { turnId: "turn-subagent-owned" }
     });
+    writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId }, broadResearchRouterOutput, "llm", undefined, marker.turnId));
     const subagentOwned = buildResearchReport(prompt, [], "not_configured", {
       runId: marker.runId,
       turnId: marker.turnId,

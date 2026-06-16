@@ -11,6 +11,7 @@ import { currentResearchReportPath, repoHash, researchRunHookEventsPath, researc
 import { addManualSourceToReport, addSubagentReport, buildResearchReport, mergeSubagentReports, runResearch } from "../src/researchOrchestrator.js";
 import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
 import { broadResearchRouterOutput } from "./routerFixtures.js";
+import { fakeRouteRunner } from "./hookTestUtils.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-trigger-audit-"));
@@ -34,7 +35,7 @@ describe("programmatic trigger audit", () => {
 
   it("UserPromptSubmit writes hook_events.jsonl and marker trigger fields", () => {
     const cwd = tempRepo();
-    userPromptSubmit({ cwd, prompt: "research current AI agent frameworks", turnId: "turn-trigger-hook" }, process.cwd());
+    userPromptSubmit({ cwd, prompt: "research current AI agent frameworks", turnId: "turn-trigger-hook" }, process.cwd(), { routeRunner: fakeRouteRunner(broadResearchRouterOutput) });
     const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-trigger-hook"), "utf8")) as HookMarker;
 
     expect(marker.triggerSource).toBe("hook_user_prompt_submit");
@@ -47,7 +48,7 @@ describe("programmatic trigger audit", () => {
 
   it("hooks status reports run-owned hook events when global state is empty", () => {
     const cwd = tempRepo();
-    userPromptSubmit({ cwd, prompt: "research current AI agent frameworks", turnId: "turn-trigger-status" }, process.cwd());
+    userPromptSubmit({ cwd, prompt: "research current AI agent frameworks", turnId: "turn-trigger-status" }, process.cwd(), { routeRunner: fakeRouteRunner(broadResearchRouterOutput) });
     const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-trigger-status"), "utf8")) as HookMarker;
 
     const status = hookStatus(cwd) as Record<string, unknown>;

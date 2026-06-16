@@ -25,6 +25,18 @@ export interface HookMarker {
   bypass: boolean;
   routeStatus?: RouteStatus;
   routerBlockCount?: number;
+  routerTracePath?: string;
+  routerRoute?: string;
+  routerPreflightSource?: "user_prompt_submit" | "stop_hook";
+  routerPreflightSucceeded?: boolean;
+  routerPreflightFailureReason?: string;
+  routerPreflightCompletedAt?: string;
+  stopAutoRouteAttempted?: boolean;
+  stopAutoRouteFailureReason?: string;
+  strictResearchStopAttempted?: boolean;
+  strictResearchStopFailureReason?: string;
+  strictResearchAutoRunCompletedAt?: string;
+  rawUserPrompt?: string;
   blockCount: number;
   maxBlocks: number;
   cwd: string;
@@ -171,6 +183,7 @@ export function createHookMarker(options: CreateHookMarkerOptions): HookMarker {
     bypass: options.bypass === true,
     routeStatus: options.routeStatus,
     routerBlockCount: 0,
+    rawUserPrompt: options.prompt,
     blockCount: 0,
     maxBlocks: options.maxBlocks ?? DEFAULT_MAX_BLOCKS,
     cwd,
