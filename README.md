@@ -27,17 +27,19 @@ Weak sources such as community discussions can be required in exhaustive mode wh
 - Blocks obvious private-path access through a PreToolUse guard.
 - Blocks stopping before manifest/validation/final holdout states when hardflow is required.
 - Plans parallel module work and disables worktree execution when the repo has no HEAD commit.
-- Installs concise global Codex guidance, custom agents, hooks config, and a canonical user skill.
+- Installs programmatic hooks, wrapper, and config for strict mode; AGENTS.md guidance, skills, and App subagents are opt-in assisted-mode additions.
 
 ## Install
 
 ```sh
 npm install
 npm run verify
-node dist/cli.js install-global
+node dist/cli.js install-global --mode strict
 ```
 
 The package pins `@openai/codex-sdk` to `0.134.0`. Do not upgrade the Codex CLI or SDK unless you intentionally choose to.
+
+Strict install is the default. It installs only the wrapper, hooks/config, state directories, and private store needed for programmatic trigger and strict research. It does not install a HardFlow section into `~/.codex/AGENTS.md`, does not install an active `codex-hardflow` skill, and does not install App subagents unless you explicitly request assisted mode.
 
 ## Quick Start
 
@@ -64,9 +66,9 @@ codex-hardflow parallel modules.yaml
 codex-hardflow verify
 ```
 
-Task routing is handled by the structured LLM Router and recorded in `.agent/reports/runs/<runId>/router_trace.json`. Parent router traces update `.agent/reports/current/router_trace.json`; subagent router traces are isolated under `.agent/reports/runs/<runId>/subagents/*.router_trace.json` and must not overwrite current. UserPromptSubmit creates a router-required marker for every non-empty prompt; route decisions come from the LLM Router, not AGENTS.md, skills, or keyword classification. `research --run-id <runId>` reuses an existing parent router trace for the same runId by default; `--run-router` explicitly reruns and replaces it. `route=research` defaults to `strict_programmatic`, `coverageMode=exhaustive`, and `parallelPolicy=all_required`. If SDK threads are unavailable, or if no required buckets/workers are produced, strict mode fails honestly instead of falling back to App/AGENTS/skill/manual flow. In exhaustive strict research, SDK execution defaults to all required buckets in parallel unless the user sets a lower concurrency. `--write-trace` is a boolean flag and does not consume task text. Deterministic keyword heuristics are only safety/preflight diagnostics, not the primary route source.
+Task routing is handled by the structured LLM Router and recorded in `.agent/reports/runs/<runId>/router_trace.json`. Parent router traces update `.agent/reports/current/router_trace.json`; subagent router traces are isolated under `.agent/reports/runs/<runId>/subagents/*.router_trace.json` and must not overwrite current. UserPromptSubmit creates a router marker for every non-empty prompt and runs route preflight directly; route decisions come from the LLM Router, not AGENTS.md, skills, or keyword classification. `research --run-id <runId>` reuses an existing parent router trace for the same runId by default; `--run-router` explicitly reruns and replaces it. `route=research` defaults to `strict_programmatic`, `coverageMode=exhaustive`, and `parallelPolicy=all_required`. If SDK threads are unavailable, or if no required buckets/workers are produced, strict mode fails honestly instead of falling back to App/AGENTS/skill/manual flow. In exhaustive strict research, SDK execution defaults to all required buckets in parallel unless the user sets a lower concurrency. `--write-trace` is a boolean flag and does not consume task text. Deterministic keyword heuristics are only safety/preflight diagnostics, not the primary route source.
 
-AGENTS.md and the codex-hardflow skill are protocol documentation, not enforcement triggers. A run can claim hardflow completion only when a hook/CLI audit trail records `programmaticTrigger=true`.
+AGENTS.md is not required for HardFlow and should not be used as a trigger or fallback. In strict mode, HardFlow relies on UserPromptSubmit/Stop hooks, CLI commands, SDK worker runs, EvidenceLedger, and coverage evaluation. A run can claim hardflow completion only when a hook/CLI audit trail records `programmaticTrigger=true`.
 
 Use `codex-hardflow research --runner app_handoff` only for explicit interactive/manual mode or a user-approved downgrade after strict failure. `app_handoff` creates an exhaustive plan but is best-effort execution; every required bucket still needs evidence, an explicit `searched_but_no_signal`, or an exclusion reason. It does not imply `programmaticMultiAgent=true`; manual source backfill changes `evidence_mode`, not `runner_mode`. Parent reports are run-owned under `.agent/reports/runs/<runId>/research_report.json`; `.agent/reports/current/research_report.json` is only the current parent copy. During implementation, external docs/examples/security/version/troubleshooting needs should be recorded as ResearchRequests and resolved through strict programmatic research instead of guessed.
 
@@ -74,7 +76,24 @@ Coverage scores are measured against the configured hardflow matrix/plan. In exh
 
 ## Global Installation
 
-`codex-hardflow install-global` writes global files under Codex/user directories with backups for existing files. Hooks are configured but not trusted automatically. Open an interactive Codex CLI, run `/hooks`, review the commands, and trust them.
+Recommended install:
+
+```sh
+codex-hardflow install-global --mode strict
+```
+
+Strict mode writes global files under Codex/user directories with backups for existing files, but keeps HardFlow out of AGENTS.md and skills by default. It installs the wrapper, hook config, Codex config, hardflow state, and private store. It also removes an old managed HardFlow AGENTS.md block or active codex-hardflow skill if present, after backing up the file.
+
+Optional assisted mode is explicit:
+
+```sh
+codex-hardflow install-global --mode assisted
+codex-hardflow install-global --with-skill
+codex-hardflow install-global --with-app-agents
+codex-hardflow install-global --with-agents-docs
+```
+
+Assisted mode may install protocol docs, a skill, and App subagents for users who want soft guidance. These are not the strict enforcement path. Hooks are configured but not trusted automatically. Open an interactive Codex CLI, run `/hooks`, review the commands, and trust them.
 
 ## Safety Boundary
 

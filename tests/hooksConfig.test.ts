@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import { buildGlobalHooksConfig } from "../src/config.js";
 
 describe("global hooks config", () => {
-  it("generates the Codex three-level hooks.json schema", () => {
+  it("generates the strict default Codex three-level hooks.json schema", () => {
     const config = buildGlobalHooksConfig(process.cwd());
     const hooks = config.hooks as Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>>;
-    const expectedEvents = ["UserPromptSubmit", "PreToolUse", "Stop", "SubagentStart", "SubagentStop"];
-    const unusedEvents = ["PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart"];
+    const expectedEvents = ["UserPromptSubmit", "PreToolUse", "Stop"];
+    const unusedEvents = ["PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SubagentStart", "SubagentStop"];
     const bin = resolve(process.cwd(), "bin", "codex-hardflow");
 
     expect(config).toHaveProperty("hooks");
@@ -37,5 +37,14 @@ describe("global hooks config", () => {
     expect("Edit").toMatch(pattern);
     expect("Write").toMatch(pattern);
     expect("mcp__filesystem__read_file").toMatch(pattern);
+  });
+
+  it("adds App subagent hooks only when assisted app agents are requested", () => {
+    const config = buildGlobalHooksConfig(process.cwd(), { withAppAgents: true });
+
+    expect(config.hooks.SubagentStart).toBeDefined();
+    expect(config.hooks.SubagentStop).toBeDefined();
+    expect(config.hooks.SubagentStart?.[0]?.hooks[0]?.command).toContain("hook subagent-start-context");
+    expect(config.hooks.SubagentStop?.[0]?.hooks[0]?.command).toContain("hook subagent-stop-loop-gate");
   });
 });

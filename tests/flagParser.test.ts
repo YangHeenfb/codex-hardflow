@@ -51,6 +51,14 @@ describe("typed CLI flag parser", () => {
     expect(parsed.flags["required-buckets"]).toBe("official_docs,github");
   });
 
+  it("parses install-global mode and opt-in assisted flags", () => {
+    const parsed = parseFlagArgs(["--mode", "strict", "--with-skill", "--with-app-agents=false", "--with-agents-docs"]);
+    expect(parsed.flags.mode).toBe("strict");
+    expect(parsed.flags["with-skill"]).toBe(true);
+    expect(parsed.flags["with-app-agents"]).toBe(false);
+    expect(parsed.flags["with-agents-docs"]).toBe(true);
+  });
+
   it("fails unknown flags clearly", () => {
     expect(() => parseFlagArgs(["--unknown", "task text"])).toThrow("Unknown flag: --unknown");
   });

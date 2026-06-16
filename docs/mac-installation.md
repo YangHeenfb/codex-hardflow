@@ -11,10 +11,16 @@ Do not force-upgrade to latest. Upgrade only when explicitly requested and after
 
 Remote package or latest checks can hit HTTP 403 in this environment. Treat that as an inability to confirm, not as a failure that requires upgrading.
 
-Add `bin/codex-hardflow` to `PATH` or use `npm link` after `npm run build`.
+Recommended install:
 
-Skills path strategy:
+```sh
+node dist/cli.js install-global --mode strict
+```
+
+Strict mode installs hooks/wrapper/config only. It does not install a HardFlow AGENTS block, active skill, or App subagents by default.
+
+Optional skill path strategy for `--with-skill` only:
 
 - Canonical user skill path: `~/.agents/skills/codex-hardflow/SKILL.md`
 - Legacy/compat path observed on this Mac: `~/.codex/skills`
-- The installer probes and avoids duplicate active same-name skills.
+- Strict install removes old active same-name skills after backup; optional assisted install writes the canonical path first.

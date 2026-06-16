@@ -158,7 +158,8 @@ export interface SkillPathStrategy {
 }
 
 export function skillPathStrategy(): SkillPathStrategy {
-  const canonicalPath = resolve(join(homedir(), ".agents", "skills", "codex-hardflow", "SKILL.md"));
+  const skillRoot = resolve(process.env.CODEX_HARDFLOW_SKILL_ROOT ?? join(homedir(), ".agents", "skills"));
+  const canonicalPath = resolve(join(skillRoot, "codex-hardflow", "SKILL.md"));
   const legacyPath = resolve(join(codexHome(), "skills", "codex-hardflow", "SKILL.md"));
   return {
     canonicalPath,
@@ -167,6 +168,6 @@ export function skillPathStrategy(): SkillPathStrategy {
     legacyExists: existsSync(legacyPath),
     installAction: "install-canonical",
     discoverySmokeTest: "manual_required",
-    note: "Install canonical ~/.agents/skills first. If interactive /skills proves this Codex build only recognizes ~/.codex/skills, ask before moving or symlinking to avoid duplicate active SKILL.md files."
+    note: "Strict install keeps codex-hardflow skills inactive. Optional --with-skill installs canonical ~/.agents/skills first; ask before moving or symlinking to ~/.codex/skills to avoid duplicate active SKILL.md files."
   };
 }

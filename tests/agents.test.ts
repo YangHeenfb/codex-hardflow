@@ -27,6 +27,7 @@ describe("researcher agent definitions", () => {
       expect(result.files).toContain(join(codexHome, "agents", "competitor_researcher.toml"));
       expect(readFileSync(join(codexHome, "agents", "local_repo_researcher.toml"), "utf8")).toContain("local_project_profile");
       expect(readFileSync(join(codexHome, "agents", "competitor_researcher.toml"), "utf8")).toContain("competitor_matrix");
+      expect(readFileSync(join(codexHome, "agents", "local_repo_researcher.toml"), "utf8")).not.toContain("Global Codex Hardflow Protocol");
     } finally {
       if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = originalCodexHome;

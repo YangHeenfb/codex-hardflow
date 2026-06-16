@@ -102,6 +102,32 @@ export interface ConfigMergeResult {
   backupPath?: string;
 }
 
+export type InstallMode = "strict" | "assisted";
+
+export interface InstallGlobalOptions {
+  mode?: InstallMode;
+  withSkill?: boolean;
+  withAppAgents?: boolean;
+  withAgentsDocs?: boolean;
+}
+
+export interface EffectiveInstallGlobalOptions {
+  mode: InstallMode;
+  withSkill: boolean;
+  withAppAgents: boolean;
+  withAgentsDocs: boolean;
+}
+
+export function resolveInstallGlobalOptions(options: InstallGlobalOptions = {}): EffectiveInstallGlobalOptions {
+  const mode = options.mode ?? "strict";
+  return {
+    mode,
+    withSkill: options.withSkill ?? mode === "assisted",
+    withAppAgents: options.withAppAgents ?? mode === "assisted",
+    withAgentsDocs: options.withAgentsDocs ?? mode === "assisted"
+  };
+}
+
 export function mergeGlobalCodexConfig(): ConfigMergeResult {
   const home = codexHome();
   mkdirSync(home, { recursive: true });
@@ -134,23 +160,43 @@ export function mergeGlobalCodexConfig(): ConfigMergeResult {
   return { changed: toml !== before, skipped, backupPath: backups[0] };
 }
 
-function shortGlobalAgentsSection(sourceRoot: string): string {
+const GLOBAL_AGENTS_MARKER = "# Global Codex Hardflow Protocol";
+
+function globalAgentsDocsSection(sourceRoot: string): string {
   return `\n# Global Codex Hardflow Protocol\n\nAGENTS.md is protocol documentation, not a hardflow trigger. Research-heavy tasks should be routed by UserPromptSubmit/Router, not by AGENTS.md alone. Hardflow is active only when a UserPromptSubmit marker/router_trace exists or the user/CLI explicitly runs codex-hardflow. Do not claim hardflow was executed unless programmaticTrigger=true or the user explicitly ran codex-hardflow.\n\nIf a codex-hardflow marker/router_trace exists, follow its runId, triggerSource, routerOutput, CoveragePlan, EvidenceLedger, report ownership, and evidence gates. If no marker/router_trace exists, answer normally or ask whether to use hardflow.\n\nParent router traces live at .agent/reports/runs/<runId>/router_trace.json. Coverage plans and evidence ledgers live at .agent/reports/runs/<runId>/coverage_plan.json and .agent/reports/runs/<runId>/evidence_ledger.json. Parent reports live at .agent/reports/runs/<runId>/research_report.json. Router route=research defaults to strict_programmatic SDK threads, coverageMode=exhaustive, and parallelPolicy=all_required. App subagents are optional best-effort workers, not the strict coverage mechanism; if they are not actually spawned, record subagent_status=\"not_spawned\" and subagent_skip_reason.\n\nUse stable codex-hardflow CLI report commands with --run-id for backfill. Dev entrypoints are for explicit maintainer work only. Detailed protocols live in ${sourceRoot}/docs and the codex-hardflow skill.\n`;
 }
 
-export function installGlobalAgentsMd(sourceRoot: string): { path: string; backupPath?: string } {
+export function globalAgentsMdHasHardflowBlock(): boolean {
+  const target = join(codexHome(), "AGENTS.md");
+  if (!existsSync(target)) return false;
+  return readFileSync(target, "utf8").includes(GLOBAL_AGENTS_MARKER);
+}
+
+export function removeGlobalAgentsMdBlock(): { path: string; removed: boolean; backupPath?: string } {
+  const target = join(codexHome(), "AGENTS.md");
+  mkdirSync(dirname(target), { recursive: true });
+  if (!existsSync(target)) return { path: target, removed: false };
+  const existing = readFileSync(target, "utf8");
+  if (!existing.includes(GLOBAL_AGENTS_MARKER)) return { path: target, removed: false };
+  const backups: string[] = [];
+  backupIfExists(target, backups);
+  const next = existing.replace(new RegExp(`\\n?${GLOBAL_AGENTS_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*$`), "").trimEnd();
+  writeFileSync(target, next.length > 0 ? `${next}\n` : "");
+  return { path: target, removed: true, backupPath: backups[0] };
+}
+
+export function installGlobalAgentsMdDocs(sourceRoot: string): { path: string; installed: boolean; backupPath?: string } {
   const target = join(codexHome(), "AGENTS.md");
   mkdirSync(dirname(target), { recursive: true });
   const backups: string[] = [];
   backupIfExists(target, backups);
   const existing = existsSync(target) ? readFileSync(target, "utf8") : "";
-  const marker = "# Global Codex Hardflow Protocol";
-  const section = shortGlobalAgentsSection(sourceRoot);
-  const next = existing.includes(marker)
-    ? existing.replace(new RegExp(`\\n?# Global Codex Hardflow Protocol[\\s\\S]*$`), section)
+  const section = globalAgentsDocsSection(sourceRoot);
+  const next = existing.includes(GLOBAL_AGENTS_MARKER)
+    ? existing.replace(new RegExp(`\\n?${GLOBAL_AGENTS_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*$`), section)
     : `${existing}${existing.endsWith("\n") || existing.length === 0 ? "" : "\n"}${section}`;
   writeFileSync(target, next.endsWith("\n") ? next : `${next}\n`);
-  return { path: target, backupPath: backups[0] };
+  return { path: target, installed: true, backupPath: backups[0] };
 }
 
 const agentDefinitions = [
@@ -178,7 +224,7 @@ export function installGlobalCustomAgents(): { files: string[]; backups: string[
     const developer = description
       .replace(/\\/g, "\\\\")
       .replace(/"""/g, '\\"\\"\\"');
-    const toml = `name = "${name}"\ndescription = "${description}"\n${sandbox}developer_instructions = """\n${developer}\nFollow the Global Codex Hardflow Protocol. Output structured summaries and do not disclose hidden validator artifacts.\n"""\n`;
+    const toml = `name = "${name}"\ndescription = "${description}"\n${sandbox}developer_instructions = """\n${developer}\nOperate only as an explicitly installed assisted-mode role. Output structured summaries and do not disclose private validation artifacts.\n"""\n`;
     writeFileSync(target, toml);
     files.push(target);
   }
@@ -192,6 +238,35 @@ export function installGlobalSkill(sourceRoot: string): { path: string; strategy
   const content = `---\nname: codex-hardflow\ndescription: Protocol documentation for codex-hardflow markers, router traces, run-owned reports, CoveragePlan, EvidenceLedger, source coverage, and validation gates. The skill itself is not an enforcement trigger.\n---\n\n# codex-hardflow\n\nThis skill is protocol documentation, not a hardflow trigger. Research-heavy tasks should be routed by UserPromptSubmit/Router, not by this skill alone. Hardflow is active only when a UserPromptSubmit marker/router_trace exists or the user/CLI explicitly runs codex-hardflow. Do not claim hardflow was executed unless programmaticTrigger=true or the user explicitly ran codex-hardflow.\n\nIf a codex-hardflow marker/router_trace exists, follow its runId, triggerSource, routerOutput, CoveragePlan, EvidenceLedger, report ownership, subagent status, and evidence gates. If no marker/router_trace exists, answer normally or ask whether to use hardflow.\n\nParent router traces live at .agent/reports/runs/<runId>/router_trace.json. Coverage plans and evidence ledgers live at .agent/reports/runs/<runId>/coverage_plan.json and .agent/reports/runs/<runId>/evidence_ledger.json. Parent reports live at .agent/reports/runs/<runId>/research_report.json. Router route=research defaults to strict_programmatic SDK threads, coverageMode=exhaustive, and parallelPolicy=all_required. Subagent reports/traces must stay under .agent/reports/runs/<runId>/subagents/. App subagents are optional best-effort workers, not the strict coverage mechanism; if they are not actually spawned, record subagent_status=\"not_spawned\" and subagent_skip_reason. Manual search must be backfilled as manual evidence, not claimed as strict programmatic research.\n\nUse stable codex-hardflow CLI report commands with --run-id for backfill. Use --strict-programmatic when hardflow must rely on SDK threads instead of App/AGENTS/skill guidance. Dev entrypoints are for explicit maintainer work only.\n\nNever disclose hidden tests, validator prompts, private fixtures, regression bank fingerprints, final holdout details, or private store paths. If the CLI is unavailable, tell the user to run npm run build and codex-hardflow install-global from ${sourceRoot}. Do not claim hardflow completed.\n`;
   writeFileSync(target, content);
   return { path: target, strategy };
+}
+
+export function disableGlobalSkill(): {
+  path: string;
+  paths: string[];
+  disabled: boolean;
+  disabledPaths: string[];
+  backupPath?: string;
+  backupPaths: string[];
+  strategy: ReturnType<typeof skillPathStrategy>;
+} {
+  const strategy = skillPathStrategy();
+  const backups: string[] = [];
+  const disabledPaths: string[] = [];
+  for (const target of [strategy.canonicalPath, strategy.legacyPath]) {
+    if (!existsSync(target)) continue;
+    backupIfExists(target, backups);
+    rmSync(target, { force: true });
+    disabledPaths.push(target);
+  }
+  return {
+    path: strategy.canonicalPath,
+    paths: [strategy.canonicalPath, strategy.legacyPath],
+    disabled: disabledPaths.length > 0,
+    disabledPaths,
+    backupPath: backups[0],
+    backupPaths: backups,
+    strategy: skillPathStrategy()
+  };
 }
 
 export interface HookCommandHandler {
@@ -211,8 +286,8 @@ export interface GlobalHooksConfig {
     UserPromptSubmit: HookMatcherGroup[];
     PreToolUse: HookMatcherGroup[];
     Stop: HookMatcherGroup[];
-    SubagentStart: HookMatcherGroup[];
-    SubagentStop: HookMatcherGroup[];
+    SubagentStart?: HookMatcherGroup[];
+    SubagentStop?: HookMatcherGroup[];
   };
 }
 
@@ -225,9 +300,9 @@ function hookHandler(command: string, statusMessage: string, timeout = 30): Hook
   };
 }
 
-export function buildGlobalHooksConfig(sourceRoot: string): GlobalHooksConfig {
+export function buildGlobalHooksConfig(sourceRoot: string, options: { withAppAgents?: boolean } = {}): GlobalHooksConfig {
   const bin = resolve(sourceRoot, "bin", "codex-hardflow");
-  return {
+  const config: GlobalHooksConfig = {
     hooks: {
       UserPromptSubmit: [
         {
@@ -244,32 +319,36 @@ export function buildGlobalHooksConfig(sourceRoot: string): GlobalHooksConfig {
         {
           hooks: [hookHandler(`${bin} hook stop-validation-gate`, "Checking hardflow validation gate", Math.ceil(DEFAULT_TRIGGER_RUNTIME_CONFIG.strictResearchStopTimeoutMs / 1000) + 60)]
         }
-      ],
-      SubagentStart: [
-        {
-          hooks: [hookHandler(`${bin} hook subagent-start-context`, "Adding hardflow subagent context")]
-        }
-      ],
-      SubagentStop: [
-        {
-          hooks: [hookHandler(`${bin} hook subagent-stop-loop-gate`, "Checking hardflow subagent output")]
-        }
       ]
     }
   };
+  if (options.withAppAgents) {
+    config.hooks.SubagentStart = [
+      {
+        hooks: [hookHandler(`${bin} hook subagent-start-context`, "Adding hardflow subagent context")]
+      }
+    ];
+    config.hooks.SubagentStop = [
+      {
+        hooks: [hookHandler(`${bin} hook subagent-stop-loop-gate`, "Checking hardflow subagent output")]
+      }
+    ];
+  }
+  return config;
 }
 
-export function installGlobalHooks(sourceRoot: string): { path: string; backupPath?: string } {
+export function installGlobalHooks(sourceRoot: string, options: { withAppAgents?: boolean } = {}): { path: string; backupPath?: string } {
   const target = join(codexHome(), "hooks.json");
   mkdirSync(dirname(target), { recursive: true });
   const backups: string[] = [];
   backupIfExists(target, backups);
-  const config = buildGlobalHooksConfig(sourceRoot);
+  const config = buildGlobalHooksConfig(sourceRoot, options);
   writeFileSync(target, `${JSON.stringify(config, null, 2)}\n`);
   return { path: target, backupPath: backups[0] };
 }
 
-export function installGlobal(sourceRoot: string): Record<string, unknown> {
+export function installGlobal(sourceRoot: string, options: InstallGlobalOptions = {}): Record<string, unknown> {
+  const effective = resolveInstallGlobalOptions(options);
   mkdirSync(hardflowStateDir(), { recursive: true });
   mkdirSync(privateStoreRoot(), { recursive: true, mode: 0o700 });
   mkdirSync(hardflowHome(), { recursive: true });
@@ -278,14 +357,19 @@ export function installGlobal(sourceRoot: string): Record<string, unknown> {
   chmodSync(resolve(sourceRoot, "bin", "codex-hardflow"), 0o755);
 
   const config = mergeGlobalCodexConfig();
-  const agentsMd = installGlobalAgentsMd(sourceRoot);
-  const agents = installGlobalCustomAgents();
-  const skill = installGlobalSkill(sourceRoot);
-  const hooks = installGlobalHooks(sourceRoot);
+  const agentsMd = effective.withAgentsDocs ? installGlobalAgentsMdDocs(sourceRoot) : removeGlobalAgentsMdBlock();
+  const agents = effective.withAppAgents ? installGlobalCustomAgents() : { installed: false, files: [], backups: [] };
+  const skill = effective.withSkill ? { installed: true, ...installGlobalSkill(sourceRoot) } : { installed: false, ...disableGlobalSkill() };
+  const hooks = installGlobalHooks(sourceRoot, { withAppAgents: effective.withAppAgents });
   const wrapper = installShellWrapper(sourceRoot);
   const parseSmoke = spawnSync("codex", ["features", "list"], { encoding: "utf8", timeout: 15_000 });
+  const strategy = skillPathStrategy();
 
   return {
+    mode: effective.mode,
+    strictProgrammaticInstall: effective.mode === "strict" && !effective.withAgentsDocs && !effective.withSkill && !effective.withAppAgents,
+    activeSkillInstalled: strategy.canonicalExists || strategy.legacyExists,
+    hardflowAgentsMdBlockInstalled: globalAgentsMdHasHardflowBlock(),
     config,
     agentsMd,
     agents,
@@ -296,7 +380,9 @@ export function installGlobal(sourceRoot: string): Record<string, unknown> {
     privateStoreCreated: true,
     parseSmokePassed: parseSmoke.status === 0,
     hooksTrust: "pending: open interactive Codex CLI, run /hooks, review, and trust. TERM=dumb cannot complete trust.",
-    skillDiscovery: "manual_required: use interactive /skills to verify discovery; do not duplicate SKILL.md in ~/.codex/skills unless user approves move or symlink.",
+    skillDiscovery: effective.withSkill
+      ? "manual_required: use interactive /skills to verify discovery; do not duplicate SKILL.md in ~/.codex/skills unless user approves move or symlink."
+      : "not_installed: strict mode does not install the codex-hardflow skill unless --with-skill is requested.",
     home: homedir()
   };
 }

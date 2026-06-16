@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { cliPathStatus } from "./cliPaths.js";
 import { codexRunnerStatus } from "./codexRunner.js";
-import { installGlobal, SDK_VERSION } from "./config.js";
+import { globalAgentsMdHasHardflowBlock, installGlobal, SDK_VERSION, type InstallMode } from "./config.js";
 import { evaluateCoverage } from "./coverageEval.js";
 import { parseCsv, parseNumberCsv, runDiagnostics, type DiagnosticsCommand } from "./diagnostics/sdkDiagnostics.js";
 import { requireExecutorManifest } from "./executionOrchestrator.js";
@@ -92,6 +92,12 @@ function coverageModeFlag(value: string | undefined): CoverageMode | undefined {
   if (value === undefined) return undefined;
   if (value === "exhaustive" || value === "balanced" || value === "fast") return value;
   throw new Error(`Invalid --coverage-mode: ${value}`);
+}
+
+function installModeFlag(value: string | undefined): InstallMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === "strict" || value === "assisted") return value;
+  throw new Error(`Invalid --mode: ${value}`);
 }
 
 function parallelPolicyFlag(value: string | undefined): ParallelPolicy | undefined {
@@ -205,6 +211,9 @@ export function status(cwd: string, root = sourceRoot): Record<string, unknown> 
   const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
   const strategy = skillPathStrategy();
   const pathStatus = cliPathStatus(root);
+  const activeSkillInstalled = strategy.canonicalExists || strategy.legacyExists;
+  const hardflowAgentsMdBlockInstalled = globalAgentsMdHasHardflowBlock();
+  const hooksJsonExists = existsSync(resolve(codexHome(), "hooks.json"));
   return {
     sourceRoot: root,
     distPath: resolve(root, "dist", "cli.js"),
@@ -226,9 +235,12 @@ export function status(cwd: string, root = sourceRoot): Record<string, unknown> 
     sdk: codexRunnerStatus(),
     sdkPinned: packageJson.dependencies?.["@openai/codex-sdk"] === SDK_VERSION,
     codexHome: codexHome(),
-    hooksJsonExists: existsSync(resolve(codexHome(), "hooks.json")),
+    hooksJsonExists,
     canonicalSkillExists: strategy.canonicalExists,
     legacySkillExists: strategy.legacyExists,
+    activeSkillInstalled,
+    hardflowAgentsMdBlockInstalled,
+    strictProgrammaticInstall: hooksJsonExists && !activeSkillInstalled && !hardflowAgentsMdBlockInstalled,
     privateStoreConfigured: existsSync(privateStoreRoot()),
     privateStorePathPrinted: false,
     headCommitExists: hasHeadCommit(cwd),
@@ -655,9 +667,18 @@ async function main(): Promise<void> {
         printJson(planParallelModules(resolve(cwd, file), cwd, args.includes("--execute")));
         return;
       }
-      case "install-global":
-        printJson(installGlobal(sourceRoot));
+      case "install-global": {
+        const parsed = parseFlagArgs(args);
+        printJson(
+          installGlobal(sourceRoot, {
+            mode: installModeFlag(stringFlag(parsed.flags, "mode")),
+            withSkill: Object.hasOwn(parsed.flags, "with-skill") ? booleanFlag(parsed.flags, "with-skill") : undefined,
+            withAppAgents: Object.hasOwn(parsed.flags, "with-app-agents") ? booleanFlag(parsed.flags, "with-app-agents") : undefined,
+            withAgentsDocs: Object.hasOwn(parsed.flags, "with-agents-docs") ? booleanFlag(parsed.flags, "with-agents-docs") : undefined
+          })
+        );
         return;
+      }
       case "verify":
       case "verify:self":
         {
@@ -731,7 +752,7 @@ async function main(): Promise<void> {
             "codex-hardflow probe-logprobs",
             "codex-hardflow repair-loop",
             "codex-hardflow parallel modules.yaml [--execute]",
-            "codex-hardflow install-global",
+            "codex-hardflow install-global [--mode strict|assisted] [--with-skill] [--with-app-agents] [--with-agents-docs]",
             "codex-hardflow verify",
             "codex-hardflow hook <hook-name>",
             "codex-hardflow uninstall --dry-run"

@@ -14,7 +14,10 @@ const BOOLEAN_FLAGS = new Set([
   "searched-but-no-signal",
   "randomize",
   "no-randomize",
-  "materialize-dry-run"
+  "materialize-dry-run",
+  "with-skill",
+  "with-app-agents",
+  "with-agents-docs"
 ]);
 
 const STRING_FLAGS = new Set([
@@ -24,6 +27,7 @@ const STRING_FLAGS = new Set([
   "repeats",
   "run-id",
   "run-id-prefix",
+  "mode",
   "runner",
   "owner",
   "parent-run-id",

@@ -81,6 +81,28 @@ describe("UserPromptSubmit router preflight injection", () => {
     expect(existsSync(researchRunRouterTracePath(cwd, String(marker.runId)))).toBe(true);
   });
 
+  it("routes programmatically without AGENTS.md or skill guidance", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "hardflow-userprompt-no-agents-"));
+    const result = userPromptSubmit(
+      {
+        cwd,
+        prompt: "What are current practical solutions for agent memory?",
+        turnId: "turn-no-agents-or-skill"
+      },
+      process.cwd(),
+      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "github", "community"])) }
+    );
+    const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-no-agents-or-skill"), "utf8")) as Record<string, unknown>;
+
+    expect(existsSync(join(cwd, "AGENTS.md"))).toBe(false);
+    expect(result.decision).toBe("allow");
+    expect(marker.triggerSource).toBe("hook_user_prompt_submit");
+    expect(marker.programmaticTrigger).toBe(true);
+    expect(marker.routeStatus).toBe("routed");
+    expect(existsSync(researchRunRouterTracePath(cwd, String(marker.runId)))).toBe(true);
+    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+  });
+
   it("marks router_failed when direct route preflight fails", () => {
     const cwd = mkdtempSync(join(tmpdir(), "hardflow-userprompt-route-fail-"));
     const result = userPromptSubmit(
