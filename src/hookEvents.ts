@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { hashText, markerExpired, type HookMarker } from "./hookState.js";
-import { hardflowStateDir, repoHash, researchRunHookEventsPath, researchRunRouterTracePath } from "./paths.js";
+import { hardflowStateDir, repoHash, researchRunHookEventsPath, researchRunRouterTracePath, researchRunsDir } from "./paths.js";
 import type { TriggerSource } from "./schemas.js";
 
 export const HOOK_AUDIT_VERSION = "programmatic-trigger-v1";
@@ -52,11 +52,44 @@ export function hashAdditionalContext(value: string): string {
 
 export function readHookEvents(cwd: string, runId?: string): HookAuditEvent[] {
   const target = eventPath(resolve(cwd), runId);
+  return readHookEventsFile(target);
+}
+
+function readHookEventsFile(target: string): HookAuditEvent[] {
   if (!existsSync(target)) return [];
   return readFileSync(target, "utf8")
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as HookAuditEvent);
+}
+
+interface RunOwnedHookEventsSummary {
+  runOwnedEventCount: number;
+  latestRunOwnedEventPath?: string;
+  latestRunOwnedRunId?: string;
+}
+
+function summarizeRunOwnedHookEvents(cwd: string): RunOwnedHookEventsSummary {
+  const runsDir = researchRunsDir(resolve(cwd));
+  if (!existsSync(runsDir)) return { runOwnedEventCount: 0 };
+  let runOwnedEventCount = 0;
+  let latestRunOwnedEventPath: string | undefined;
+  let latestRunOwnedRunId: string | undefined;
+  let latestCreatedAt = 0;
+  for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const target = researchRunHookEventsPath(cwd, entry.name);
+    const events = readHookEventsFile(target);
+    runOwnedEventCount += events.length;
+    for (const event of events) {
+      const createdAt = Date.parse(event.createdAt);
+      if (!Number.isFinite(createdAt) || createdAt < latestCreatedAt) continue;
+      latestCreatedAt = createdAt;
+      latestRunOwnedEventPath = target;
+      latestRunOwnedRunId = event.runId ?? entry.name;
+    }
+  }
+  return { runOwnedEventCount, latestRunOwnedEventPath, latestRunOwnedRunId };
 }
 
 export function findMarkerByRunId(cwd: string, runId: string): HookMarker | null {
@@ -88,12 +121,23 @@ export interface HookActiveAssertion {
 }
 
 export function hookStatus(cwd: string, runId?: string): Record<string, unknown> {
-  const events = readHookEvents(cwd, runId);
+  const resolvedCwd = resolve(cwd);
+  const globalEvents = readHookEvents(resolvedCwd);
+  const events = runId ? readHookEvents(resolvedCwd, runId) : globalEvents;
+  const runOwned = summarizeRunOwnedHookEvents(resolvedCwd);
+  const globalEventCount = globalEvents.length;
+  const warning =
+    globalEventCount === 0 && runOwned.runOwnedEventCount > 0 ? "Run-owned hook events exist; global event count alone is not sufficient." : undefined;
   const marker = runId ? findMarkerByRunId(cwd, runId) : null;
   return {
     runId,
-    eventsPath: eventPath(resolve(cwd), runId),
-    eventCount: events.length,
+    eventsPath: eventPath(resolvedCwd, runId),
+    eventCount: runId ? events.length : globalEventCount + runOwned.runOwnedEventCount,
+    globalEventCount,
+    runOwnedEventCount: runOwned.runOwnedEventCount,
+    latestRunOwnedEventPath: runOwned.latestRunOwnedEventPath,
+    latestRunOwnedRunId: runOwned.latestRunOwnedRunId,
+    warning,
     events,
     marker: marker
       ? {

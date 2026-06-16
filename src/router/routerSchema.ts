@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { TriggerSource } from "../schemas.js";
+import type { CoverageMode, ParallelPolicy, TriggerSource } from "../schemas.js";
 
 export const ROUTES = [
   "direct_answer",
@@ -125,6 +125,8 @@ export interface RouterTrace {
   promptHash: string;
   routerMode: RouterMode;
   route: RouterOutput["route"];
+  coverageMode: CoverageMode | null;
+  parallelPolicy: ParallelPolicy | null;
   workflowPattern: RouterOutput["workflowPattern"];
   researchProfile: RouterOutput["researchProfile"];
   validationProfile: RouterOutput["validationProfile"];

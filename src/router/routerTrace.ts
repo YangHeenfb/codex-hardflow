@@ -37,6 +37,8 @@ export function buildRouterTrace(
     promptHash: hashText(input.rawUserPrompt),
     routerMode,
     route: output.route,
+    coverageMode: output.route === "research" ? "exhaustive" : null,
+    parallelPolicy: output.route === "research" ? "all_required" : null,
     workflowPattern: output.workflowPattern,
     researchProfile: output.researchProfile,
     validationProfile: output.validationProfile,

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { evaluateCoverage } from "../src/coverageEval.js";
 import { createHookMarker, markerPathFor, type HookMarker } from "../src/hookState.js";
-import { assertHookActive, readHookEvents } from "../src/hookEvents.js";
+import { assertHookActive, hookStatus, readHookEvents } from "../src/hookEvents.js";
 import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
 import { currentResearchReportPath, repoHash, researchRunHookEventsPath, researchRunReportPath } from "../src/paths.js";
@@ -43,6 +43,20 @@ describe("programmatic trigger audit", () => {
     const events = readHookEvents(cwd, marker.runId);
     expect(events.some((event) => event.eventName === "UserPromptSubmit" && event.programmaticTrigger === true)).toBe(true);
     expect(assertHookActive(cwd, marker.runId).passed).toBe(true);
+  });
+
+  it("hooks status reports run-owned hook events when global state is empty", () => {
+    const cwd = tempRepo();
+    userPromptSubmit({ cwd, prompt: "research current AI agent frameworks", turnId: "turn-trigger-status" }, process.cwd());
+    const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-trigger-status"), "utf8")) as HookMarker;
+
+    const status = hookStatus(cwd) as Record<string, unknown>;
+    expect(status.globalEventCount).toBe(0);
+    expect(status.runOwnedEventCount).toBe(1);
+    expect(status.eventCount).toBe(1);
+    expect(status.latestRunOwnedRunId).toBe(marker.runId);
+    expect(status.latestRunOwnedEventPath).toBe(researchRunHookEventsPath(cwd, marker.runId));
+    expect(status.warning).toBe("Run-owned hook events exist; global event count alone is not sufficient.");
   });
 
   it("CLI research reports cli_command trigger fields", async () => {

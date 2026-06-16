@@ -316,6 +316,26 @@ describe("LLM router", () => {
     expect(existsSync(researchRunRouterTracePath(cwd, "run-trace-path"))).toBe(true);
   });
 
+  it("writes exhaustive all-required defaults into research router_trace", async () => {
+    const cwd = tempRepo();
+    const { trace } = await routeWith(routerOutputForBuckets(["official_docs", "github"]), "research current docs", cwd, "run-trace-defaults");
+    const runTrace = JSON.parse(readFileSync(researchRunRouterTracePath(cwd, "run-trace-defaults"), "utf8")) as RouterTrace;
+
+    expect(trace.coverageMode).toBe("exhaustive");
+    expect(trace.parallelPolicy).toBe("all_required");
+    expect(runTrace.coverageMode).toBe("exhaustive");
+    expect(runTrace.parallelPolicy).toBe("all_required");
+  });
+
+  it("does not require coverage defaults for direct_answer router_trace", async () => {
+    const cwd = tempRepo();
+    const { trace } = await routeWith(directOutput(), "translate hello to Chinese", cwd, "run-direct-trace-defaults");
+
+    expect(trace.route).toBe("direct_answer");
+    expect(trace.coverageMode).toBeNull();
+    expect(trace.parallelPolicy).toBeNull();
+  });
+
   it("parent router_trace writes run path and updates current pointer", async () => {
     const cwd = tempRepo();
     await routeWith(routerOutputForBuckets(["official_docs"]), "research docs", cwd, "run-parent-trace");
