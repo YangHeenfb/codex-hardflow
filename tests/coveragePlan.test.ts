@@ -121,6 +121,19 @@ describe("CoveragePlan and EvidenceLedger", () => {
     }
   });
 
+  it("requires exhaustive agentic long-horizon buckets for current practical solutions", () => {
+    const plan = buildCoveragePlan(broadResearchRouterOutput, "What are current practical solutions for agentic long horizon work? 中文回答", {
+      runId: "run-agentic-long-horizon-exhaustive"
+    });
+
+    expect(plan.coverageMode).toBe("exhaustive");
+    expect(plan.requiredBuckets).toEqual(
+      expect.arrayContaining(["official_docs", "github", "community", "academic", "package_registry", "security", "blogs_engineering", "codex_default_discovery"])
+    );
+    expect(plan.sourceBuckets.every((bucket) => bucket.required)).toBe(true);
+    expect(plan.skippedPossibleBuckets).toEqual([]);
+  });
+
   it("upgrades possible buckets in exhaustive mode and records excluded buckets with reasons", () => {
     const routerOutput = routerOutputForBuckets([], {
       sourceBuckets: [

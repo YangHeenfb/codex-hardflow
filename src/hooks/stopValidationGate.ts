@@ -6,6 +6,7 @@ import { sanitizeText } from "../sanitizer.js";
 import { incrementBlockCount, markerExpired, resolveCurrentMarker, updateMarker, type HookMarker } from "../hookState.js";
 import { appendHookEvent, assertHookActive } from "../hookEvents.js";
 import { assertResearchReportEvidence } from "../researchOrchestrator.js";
+import { listEvidence } from "../coverage/evidenceLedger.js";
 import { blockingResearchRequests, failedBlockingResearchRequests, listResearchRequests } from "../research/researchRequest.js";
 import { readRouterTrace } from "../router/routerTrace.js";
 import type { RouterOutput } from "../router/routerSchema.js";
@@ -33,6 +34,16 @@ function blockOrAllow(marker: HookMarker, reason: string): GateOutput {
   return {
     decision: "block",
     reason,
+    marker: { turnId: next.turnId, promptHash: next.promptHash, blockCount: next.blockCount, maxBlocks: next.maxBlocks }
+  };
+}
+
+function hardBlock(marker: HookMarker, reason: string, hardflowStatus = "strict_research_required"): GateOutput {
+  const next = incrementBlockCount(marker);
+  return {
+    decision: "block",
+    reason,
+    hardflowStatus,
     marker: { turnId: next.turnId, promptHash: next.promptHash, blockCount: next.blockCount, maxBlocks: next.maxBlocks }
   };
 }
@@ -205,6 +216,28 @@ function validateCurrentResearchReport(cwd: string, marker: HookMarker): { valid
   return { valid: true };
 }
 
+function validateAutomaticStrictResearchArtifacts(cwd: string, report: ResearchReport): { valid: boolean; reason?: string } {
+  if (report.runner_mode !== "strict_programmatic" && report.runner_mode !== "sdk_threads") {
+    return { valid: false, reason: `route=research requires strict_programmatic/sdk_threads research; runner_mode=${report.runner_mode} cannot satisfy it.` };
+  }
+  if (report.coverageMode !== "exhaustive") {
+    return { valid: false, reason: `route=research requires coverageMode=exhaustive; coverageMode=${report.coverageMode ?? "missing"} cannot satisfy it.` };
+  }
+  if (report.parallelPolicy !== "all_required") {
+    return { valid: false, reason: `route=research requires parallelPolicy=all_required; parallelPolicy=${report.parallelPolicy ?? "missing"} cannot satisfy it.` };
+  }
+  if (report.programmaticMultiAgent !== true) {
+    return { valid: false, reason: "route=research requires programmaticMultiAgent=true from SDK workers." };
+  }
+  if (!Array.isArray(report.sdk_worker_runs) || report.sdk_worker_runs.length === 0) {
+    return { valid: false, reason: "route=research requires non-empty sdk_worker_runs; ordinary web search or manual notes cannot satisfy it." };
+  }
+  if (listEvidence(cwd, report.runId).length === 0) {
+    return { valid: false, reason: "route=research requires a non-empty EvidenceLedger; ordinary web search without EvidenceLedger cannot satisfy it." };
+  }
+  return { valid: true };
+}
+
 export function stopValidationGate(input: Record<string, unknown> = {}): Record<string, unknown> {
   const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
   const marker = resolveCurrentMarker(input, cwd);
@@ -271,20 +304,23 @@ export function stopValidationGate(input: Record<string, unknown> = {}): Record<
     const current = currentReportForMarker(cwd, marker);
     if (!current.report) {
       return finish(
-        blockOrAllow(
+        hardBlock(
           marker,
-          `${current.reason ?? "strict research_report.json is missing."} Run codex-hardflow research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required --run-id ${marker.runId} "<prompt>".`
+          `${current.reason ?? "strict research_report.json is missing."} Run codex-hardflow research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required --run-id ${marker.runId} "<prompt>".`,
+          "strict_research_report_missing"
         )
       );
     }
-    if (current.report.runner_mode !== "strict_programmatic") {
-      return finish(blockOrAllow(marker, `route=research requires strict_programmatic sdk_threads research; runner_mode=${current.report.runner_mode} cannot satisfy it.`));
+    if (current.report.runner_mode !== "strict_programmatic" && current.report.runner_mode !== "sdk_threads") {
+      return finish(hardBlock(marker, `route=research requires strict_programmatic/sdk_threads research; runner_mode=${current.report.runner_mode} cannot satisfy it.`, "strict_research_wrong_runner"));
     }
     if (current.report.status === "failed") {
-      return finish(blockOrAllow(marker, `strict_programmatic research failed: ${current.report.failure_reason ?? "missing failure_reason"}. Ask the user before downgrading to App/manual search.`));
+      return finish(hardBlock(marker, `strict_programmatic research failed: ${current.report.failure_reason ?? "missing failure_reason"}. Ask the user before downgrading to App/manual search.`, "strict_research_failed"));
     }
     const report = validateCurrentResearchReport(cwd, marker);
-    if (!report.valid) return finish(blockOrAllow(marker, report.reason ?? "strict_programmatic research_report.json does not satisfy the current hardflow marker."));
+    if (!report.valid) return finish(hardBlock(marker, report.reason ?? "strict_programmatic research_report.json does not satisfy the current hardflow marker.", "strict_research_invalid"));
+    const artifacts = validateAutomaticStrictResearchArtifacts(cwd, current.report);
+    if (!artifacts.valid) return finish(hardBlock(marker, artifacts.reason ?? "strict_programmatic research artifacts are incomplete.", "strict_research_artifacts_incomplete"));
   }
 
   const requiresSourceMatrix = routerOutput?.requiresSourceMatrix ?? marker.requiresSourceMatrix;

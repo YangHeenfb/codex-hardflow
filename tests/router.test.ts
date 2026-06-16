@@ -113,6 +113,21 @@ describe("LLM router", () => {
     );
   });
 
+  it("routes current agentic long-horizon solutions to research", async () => {
+    const cwd = tempRepo();
+    const { output } = await routeWith(
+      agentSecurityRouterOutput,
+      "What are current practical solutions for agentic long horizon work? 中文回答",
+      cwd
+    );
+
+    expect(output.route).toBe("research");
+    expect(output.requiresSourceMatrix).toBe(true);
+    expect(output.sourceBuckets.map((bucket) => bucket.bucket)).toEqual(
+      expect.arrayContaining(["official_docs", "github", "community", "academic", "security", "package_registry", "codex_default_discovery"])
+    );
+  });
+
   it("routes simple translation and casual chat to direct answers", async () => {
     const cwd = tempRepo();
     expect((await routeWith(directOutput(), "translate hello to Chinese", cwd)).output.route).toBe("direct_answer");
