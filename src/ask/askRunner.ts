@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { hardflowRunCodexHome, researchRunEvidenceLedgerPath, researchRunReportPath } from "../paths.js";
-import { loadEvidenceLedger, isNoSignalEvidence, type EvidenceItem } from "../coverage/evidenceLedger.js";
+import { loadEvidenceLedger } from "../coverage/evidenceLedger.js";
 import { evaluateCoverage, type CoverageEvalResult } from "../coverageEval.js";
 import { prepareIsolatedCodexHome } from "../codexHomeIsolation.js";
 import { runIsolatedCodexPrompt } from "../codexRunner.js";
@@ -11,29 +11,10 @@ import { createHardflowJob, readHardflowJob } from "../jobs/jobStore.js";
 import type { HardflowJob, HardflowRouterProvider, HardflowWorkerProvider } from "../jobs/jobSchema.js";
 import type { RouterOutput } from "../router/routerSchema.js";
 import type { CoverageMode, ParallelPolicy, ResearchReport } from "../schemas.js";
-import type { SdkResearchStepRunner } from "../research/sdkResearchRunner.js";
-
-export interface AskCoverageSummary {
-  coverageMode: CoverageMode | undefined;
-  parallelPolicy: ParallelPolicy | undefined;
-  requiredBucketCount: number;
-  completedRequiredBucketCount: number;
-  searchedButNoSignalCount: number;
-  excludedBucketCount: number;
-  sourceCount: number;
-  evidenceItemCount: number;
-  coverageScore: number | null;
-  coverageClaim: string | null;
-}
-
-export interface AskSourceSummary {
-  id: string;
-  bucket: string;
-  title: string;
-  urlOrRef: string;
-  claim: string;
-  confidence: string;
-}
+import { listSdkWorkerStates, type SdkResearchStepRunner } from "../research/sdkResearchRunner.js";
+import { languageInstruction, resolveOutputLanguagePolicy, type OutputLanguagePolicy } from "../i18n/languagePolicy.js";
+import { labelsForLanguage, synthesizeResearchAnswer, type AskCoverageSummary, type AskSourceSummary } from "./answerSynthesis.js";
+import { AskProgressRenderer, type AskProgressMode, type AskProgressSnapshot } from "./progressRenderer.js";
 
 export interface AskResult {
   runId: string;
@@ -44,6 +25,7 @@ export interface AskResult {
   coverageSummary: AskCoverageSummary | null;
   sourceSummary: AskSourceSummary[];
   caveats: string[];
+  outputLanguagePolicy: OutputLanguagePolicy | null;
   failureReason: string | null;
   researchReportPath: string | null;
   evidenceLedgerPath: string | null;
@@ -62,8 +44,13 @@ export interface RunAskOptions {
   routerProvider?: HardflowRouterProvider;
   workerProvider?: HardflowWorkerProvider;
   maxSourcesPerWorker?: number;
-  showProgress?: boolean;
+  progressMode?: AskProgressMode;
+  progressIntervalMs?: number;
+  isProgressTty?: boolean;
   progressWriter?: (message: string) => void;
+  maxSourcesInAnswer?: number;
+  showAllSources?: boolean;
+  showEvidenceIds?: boolean;
   mockRouterOutput?: RouterOutput;
   sdkStepRunner?: SdkResearchStepRunner;
   sdkAvailable?: boolean;
@@ -133,85 +120,36 @@ function coverageForRun(cwd: string, runId: string): CoverageEvalResult | null {
   }
 }
 
-function sourceSummary(items: EvidenceItem[]): AskSourceSummary[] {
-  return items
-    .filter((item) => !isNoSignalEvidence(item))
-    .slice(0, 12)
-    .map((item) => ({
-      id: item.id,
-      bucket: item.bucket,
-      title: item.title,
-      urlOrRef: item.urlOrRef,
-      claim: item.claim,
-      confidence: item.confidence
-    }));
-}
-
-function coverageSummary(report: ResearchReport, items: EvidenceItem[], coverage: CoverageEvalResult | null): AskCoverageSummary {
-  return {
-    coverageMode: report.coverageMode ?? report.source_matrix?.coverageMode,
-    parallelPolicy: report.parallelPolicy,
-    requiredBucketCount: report.requiredBucketCount ?? report.required_buckets.length,
-    completedRequiredBucketCount: report.completedRequiredBucketCount ?? coverage?.completedRequiredBucketCount ?? 0,
-    searchedButNoSignalCount: report.searchedButNoSignalCount ?? report.searched_but_no_signal.length,
-    excludedBucketCount: report.excludedBucketCount ?? report.excludedBuckets?.length ?? 0,
-    sourceCount: report.searched_sources_table.length,
-    evidenceItemCount: items.length,
-    coverageScore: coverage?.coverage_score ?? null,
-    coverageClaim: coverage?.coverage_claim ?? null
-  };
-}
-
-function synthesizeResearchAnswer(question: string, report: ResearchReport, items: EvidenceItem[], coverage: CoverageEvalResult | null): { answer: string; caveats: string[] } {
-  const supportingItems = items.filter((item) => !isNoSignalEvidence(item));
-  const findings = report.useful_findings.length > 0 ? report.useful_findings.slice(0, 8) : supportingItems.map((item) => item.claim).slice(0, 8);
-  const caveats = [
-    ...(report.status === "degraded" ? ["Research report status is degraded."] : []),
-    ...(report.failure_reason ? [`Research failure reason: ${report.failure_reason}`] : []),
-    ...(report.searched_but_no_signal.length > 0 ? [`Searched but no signal: ${report.searched_but_no_signal.join(", ")}`] : []),
-    ...(report.excludedBuckets?.length ? [`Excluded buckets: ${report.excludedBuckets.map((bucket) => `${bucket.bucket} (${bucket.reason})`).join(", ")}`] : []),
-    ...(report.source_gaps.length > 0 ? [`Source gaps: ${report.source_gaps.join(", ")}`] : []),
-    ...(supportingItems.length === 0 ? ["No source-bearing EvidenceLedger items were available; answer is limited to no-signal and coverage metadata."] : [])
-  ];
-  const lines = [
-    `Question: ${question}`,
-    "",
-    "Answer from HardFlow evidence:",
-    ...(findings.length > 0 ? findings.map((finding, index) => `${index + 1}. ${finding}`) : ["No useful findings were recorded in the research report."]),
-    "",
-    `Coverage: ${coverage?.coverage_score ?? "n/a"} score, ${report.completedRequiredBucketCount ?? 0}/${report.requiredBucketCount ?? report.required_buckets.length} required buckets completed, ${supportingItems.length} source-bearing evidence items.`
-  ];
-  if (supportingItems.length > 0) {
-    lines.push("", "Sources:", ...supportingItems.slice(0, 8).map((item) => `- [${item.id}] ${item.title} (${item.bucket}) ${item.urlOrRef}`));
-  }
-  if (caveats.length > 0) {
-    lines.push("", "Caveats:", ...caveats.map((caveat) => `- ${caveat}`));
-  }
-  return { answer: lines.join("\n"), caveats };
-}
-
 async function defaultDirectAnswer(prompt: string, cwd: string, runId: string): Promise<string> {
   const codexHome = prepareIsolatedCodexHome(hardflowRunCodexHome(cwd, runId));
   const previous = process.env.CODEX_HOME;
+  const policy = resolveOutputLanguagePolicy(prompt);
   process.env.CODEX_HOME = codexHome;
   try {
     return await runIsolatedCodexPrompt(
-      `Answer the user directly and concisely. Do not browse, do not claim HardFlow research ran, and do not cite external sources.\n\nUser question:\n${prompt}`,
+      `Answer the user directly and concisely. ${languageInstruction(policy)} Do not browse, do not claim HardFlow research ran, and do not cite external sources.\n\nUser question:\n${prompt}`,
       cwd,
       true,
       { purpose: "daemon_router", parentRunId: runId }
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    return `HardFlow routed this as direct_answer, so strict research was not run. Direct answer generation failed locally: ${reason}`;
+    const labels = labelsForLanguage(policy.outputLanguage);
+    return `${labels.runInfo}: HardFlow route=direct_answer; strict research was not run. ${labels.failed}: ${reason}`;
   } finally {
     if (previous === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previous;
   }
 }
 
-export function askResultFromRun(cwd: string, runId: string, questionOverride?: string): AskResult {
+export function askResultFromRun(
+  cwd: string,
+  runId: string,
+  questionOverride?: string,
+  synthesisOptions: { maxSourcesInAnswer?: number; showAllSources?: boolean; showEvidenceIds?: boolean } = {}
+): AskResult {
   const job = readHardflowJob(cwd, runId);
+  const fallbackPolicy = resolveOutputLanguagePolicy(questionOverride ?? job?.rawUserPrompt ?? "");
   if (!job) {
     return {
       runId,
@@ -222,6 +160,7 @@ export function askResultFromRun(cwd: string, runId: string, questionOverride?: 
       coverageSummary: null,
       sourceSummary: [],
       caveats: [],
+      outputLanguagePolicy: fallbackPolicy,
       failureReason: `HardFlow job not found: ${runId}`,
       researchReportPath: null,
       evidenceLedgerPath: null,
@@ -242,6 +181,7 @@ export function askResultFromRun(cwd: string, runId: string, questionOverride?: 
       coverageSummary: null,
       sourceSummary: [],
       caveats: [],
+      outputLanguagePolicy: fallbackPolicy,
       failureReason: reason,
       researchReportPath: job.researchReportPath,
       evidenceLedgerPath: job.evidenceLedgerPath,
@@ -258,6 +198,7 @@ export function askResultFromRun(cwd: string, runId: string, questionOverride?: 
       coverageSummary: null,
       sourceSummary: [],
       caveats: [],
+      outputLanguagePolicy: fallbackPolicy,
       failureReason: null,
       researchReportPath: job.researchReportPath,
       evidenceLedgerPath: job.evidenceLedgerPath,
@@ -275,6 +216,7 @@ export function askResultFromRun(cwd: string, runId: string, questionOverride?: 
       coverageSummary: null,
       sourceSummary: [],
       caveats: [],
+      outputLanguagePolicy: fallbackPolicy,
       failureReason: `research_report.json is missing for runId=${runId}`,
       researchReportPath: researchRunReportPath(cwd, runId),
       evidenceLedgerPath: researchRunEvidenceLedgerPath(cwd, runId),
@@ -283,16 +225,17 @@ export function askResultFromRun(cwd: string, runId: string, questionOverride?: 
   }
   const ledger = loadEvidenceLedger(cwd, runId);
   const coverage = coverageForRun(cwd, runId);
-  const synthesized = synthesizeResearchAnswer(questionOverride ?? report.rawUserPrompt, report, ledger.items, coverage);
+  const synthesized = synthesizeResearchAnswer(questionOverride ?? report.rawUserPrompt, report, ledger.items, coverage, synthesisOptions);
   return {
     runId,
     status: job.status,
     route: job.route,
     async: false,
     answer: synthesized.answer,
-    coverageSummary: coverageSummary(report, ledger.items, coverage),
-    sourceSummary: sourceSummary(ledger.items),
+    coverageSummary: synthesized.coverageSummary,
+    sourceSummary: synthesized.sourceSummary,
     caveats: synthesized.caveats,
+    outputLanguagePolicy: synthesized.outputLanguagePolicy,
     failureReason: null,
     researchReportPath: researchRunReportPath(cwd, runId),
     evidenceLedgerPath: researchRunEvidenceLedgerPath(cwd, runId),
@@ -300,10 +243,32 @@ export function askResultFromRun(cwd: string, runId: string, questionOverride?: 
   };
 }
 
-function progressLine(cwd: string, runId: string): string {
+function progressSnapshot(cwd: string, runId: string, startedAt: number, message?: string): AskProgressSnapshot {
   const job = readHardflowJob(cwd, runId);
-  if (!job) return `[codex-hardflow ask] runId=${runId} job=missing`;
-  return `[codex-hardflow ask] runId=${runId} status=${job.status} route=${job.route ?? "pending"} queuePosition=${job.queuePosition ?? "n/a"} allocatedWorkers=${job.allocatedWorkerCount}`;
+  const workers = listSdkWorkerStates(cwd, runId);
+  const completed = workers.filter((worker) => worker.status === "completed").length;
+  const running = workers.filter((worker) => worker.status === "running").length;
+  const failed = workers.filter((worker) => worker.status === "failed" || worker.status === "timeout" || worker.status === "needs_resume").length;
+  const retrying = 0;
+  const coverage = coverageForRun(cwd, runId);
+  const slowest = workers
+    .filter((worker) => worker.status === "running")
+    .sort((a, b) => b.durationMs - a.durationMs)[0];
+  return {
+    runId,
+    status: job?.status ?? "missing",
+    route: job?.route,
+    requiredBucketCount: job?.requestedWorkerCount || workers.length || undefined,
+    completedBucketCount: completed,
+    runningBucketCount: running,
+    failedBucketCount: failed,
+    retryingBucketCount: retrying,
+    coverageScoreSoFar: coverage?.coverage_score ?? null,
+    activeWorkerCount: job?.allocatedWorkerCount,
+    elapsedMs: Date.now() - startedAt,
+    message,
+    slowestWorker: slowest?.bucket ?? null
+  };
 }
 
 async function waitForRun(cwd: string, runId: string, timeoutMs = 0): Promise<HardflowJob | null> {
@@ -318,9 +283,14 @@ async function waitForRun(cwd: string, runId: string, timeoutMs = 0): Promise<Ha
 }
 
 export async function runAsk(options: RunAskOptions): Promise<AskResult> {
+  const synthesisOptions = {
+    maxSourcesInAnswer: options.maxSourcesInAnswer,
+    showAllSources: options.showAllSources,
+    showEvidenceIds: options.showEvidenceIds
+  };
   if (options.fromRunId) {
     await waitForRun(options.cwd, options.fromRunId, options.timeoutMs ?? 0);
-    return askResultFromRun(options.cwd, options.fromRunId, options.rawUserPrompt);
+    return askResultFromRun(options.cwd, options.fromRunId, options.rawUserPrompt, synthesisOptions);
   }
   if (!options.rawUserPrompt?.trim()) throw new Error("codex-hardflow ask requires a question.");
   const runId = options.runId ?? `run-ask-${randomUUID()}`;
@@ -349,6 +319,7 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
       coverageSummary: null,
       sourceSummary: [],
       caveats: [],
+      outputLanguagePolicy: resolveOutputLanguagePolicy(options.rawUserPrompt),
       failureReason: null,
       researchReportPath: null,
       evidenceLedgerPath: null,
@@ -356,10 +327,18 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
     };
   }
 
+  const startedAt = Date.now();
+  const progressMode = options.progressMode ?? "auto";
+  const renderer = new AskProgressRenderer({
+    mode: progressMode,
+    isTty: options.isProgressTty,
+    intervalMs: options.progressIntervalMs,
+    write: options.progressWriter ?? (() => undefined)
+  });
   let interval: NodeJS.Timeout | undefined;
-  if (options.showProgress) {
-    options.progressWriter?.(progressLine(options.cwd, job.runId));
-    interval = setInterval(() => options.progressWriter?.(progressLine(options.cwd, job.runId)), 5000);
+  if (progressMode !== "quiet") {
+    renderer.render({ ...progressSnapshot(options.cwd, job.runId, startedAt), event: "started" }, true);
+    interval = setInterval(() => renderer.render(progressSnapshot(options.cwd, job.runId, startedAt)), 1000);
   }
   try {
     const runOptions: RunJobOnceOptions = {
@@ -370,13 +349,21 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
       globalBudgetMs: options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : undefined,
       hardTimeoutMs: options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : undefined,
       maxSourcesPerWorker: options.maxSourcesPerWorker,
-      progress: options.showProgress
-        ? (event) => options.progressWriter?.(`[codex-hardflow ask] ${event.agent}/${event.bucket}: ${event.status} - ${event.message}`)
-        : undefined
+      progress:
+        progressMode !== "quiet"
+          ? (event) =>
+              renderer.render(
+                {
+                  ...progressSnapshot(options.cwd, job.runId, startedAt, `${event.agent}/${event.bucket}: ${event.status} - ${event.message}`),
+                  event: event.status
+                },
+                true
+              )
+          : undefined
     };
     const completed = await runHardflowJobOnce(options.cwd, job.runId, runOptions);
     if (completed.status !== "completed") {
-      return askResultFromRun(options.cwd, completed.runId, options.rawUserPrompt);
+      return askResultFromRun(options.cwd, completed.runId, options.rawUserPrompt, synthesisOptions);
     }
     if (completed.route === "direct_answer" || completed.route === "bypass") {
       const answer = await (options.directAnswerRunner ?? defaultDirectAnswer)(options.rawUserPrompt, options.cwd, completed.runId);
@@ -389,14 +376,17 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
         coverageSummary: null,
         sourceSummary: [],
         caveats: [],
+        outputLanguagePolicy: resolveOutputLanguagePolicy(options.rawUserPrompt),
         failureReason: null,
         researchReportPath: null,
         evidenceLedgerPath: null,
         noOrdinaryWebFallback: true
       };
     }
-    return askResultFromRun(options.cwd, completed.runId, options.rawUserPrompt);
+    renderer.render({ ...progressSnapshot(options.cwd, completed.runId, startedAt), event: "completed" }, true);
+    return askResultFromRun(options.cwd, completed.runId, options.rawUserPrompt, synthesisOptions);
   } finally {
     if (interval) clearInterval(interval);
+    renderer.finish();
   }
 }

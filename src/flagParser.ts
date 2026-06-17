@@ -21,7 +21,9 @@ const BOOLEAN_FLAGS = new Set([
   "stdin-json",
   "async",
   "show-progress",
-  "no-progress"
+  "no-progress",
+  "show-all-sources",
+  "show-evidence-ids"
 ]);
 
 const STRING_FLAGS = new Set([
@@ -100,7 +102,10 @@ const STRING_FLAGS = new Set([
   "from-run",
   "timeout-ms",
   "router-provider",
-  "worker-provider"
+  "worker-provider",
+  "progress",
+  "progress-interval-ms",
+  "max-sources-in-answer"
 ]);
 
 function parseBooleanFlagValue(key: string, value: string): boolean {
