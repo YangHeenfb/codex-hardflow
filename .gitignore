@@ -12,6 +12,7 @@ coverage/
 !.agent/reports/.gitkeep
 .agent/manifests/*
 !.agent/manifests/.gitkeep
+.agent/hardflow/
 
 .validator-private/
 .agent-private/

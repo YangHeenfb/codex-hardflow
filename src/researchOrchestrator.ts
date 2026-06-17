@@ -435,6 +435,8 @@ export function buildResearchReport(
     router_trace_stale_reason: options.routerTraceStaleReason,
     source_matrix: matrix,
     coverageMode: matrix.coverageMode,
+    researchScope: matrix.researchScope,
+    evidenceNeed: matrix.evidenceNeed,
     parallelPolicy: options.parallelPolicy,
     required_buckets: requiredBuckets,
     requiredBucketCount: requiredBuckets.length,

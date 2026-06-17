@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { hardflowJobEventsPath, hardflowJobLockPath, hardflowJobPath, hardflowJobsDir } from "../paths.js";
 import { hashText } from "../hookState.js";
 import type { RouterRoute } from "../router/routerSchema.js";
-import type { HardflowJob, HardflowJobEvent, HardflowJobStatus, CreateHardflowJobInput } from "./jobSchema.js";
+import type { DaemonRuntimeConfig } from "../config.js";
+import type { HardflowJob, HardflowJobEvent, HardflowJobPriority, HardflowJobStatus, CreateHardflowJobInput } from "./jobSchema.js";
 import { normalizeHardflowJob } from "./jobSchema.js";
 
 function nowIso(): string {
@@ -16,8 +17,24 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function priorityRank(priority: HardflowJobPriority): number {
+  if (priority === "high") return 0;
+  if (priority === "normal") return 1;
+  return 2;
+}
+
+function compareJobPriority(a: HardflowJob, b: HardflowJob): number {
+  const priority = priorityRank(a.priority) - priorityRank(b.priority);
+  if (priority !== 0) return priority;
+  if (a.foreground !== b.foreground) return a.foreground ? -1 : 1;
+  if (a.currentUserTurn !== b.currentUserTurn) return a.currentUserTurn ? -1 : 1;
+  return a.createdAt.localeCompare(b.createdAt);
+}
+
 export function createHardflowJob(input: CreateHardflowJobInput): HardflowJob {
   const createdAt = nowIso();
+  const currentUserTurn = input.currentUserTurn ?? input.triggerSource === "hook_user_prompt_submit";
+  const foreground = input.foreground ?? currentUserTurn;
   const job: HardflowJob = {
     runId: input.runId,
     createdAt,
@@ -30,6 +47,15 @@ export function createHardflowJob(input: CreateHardflowJobInput): HardflowJob {
     programmaticTrigger: true,
     status: "pending",
     route: null,
+    researchScope: null,
+    evidenceNeed: null,
+    priority: input.priority ?? (currentUserTurn ? "high" : "normal"),
+    queuePosition: null,
+    estimatedStartAfterMs: null,
+    foreground,
+    currentUserTurn,
+    requestedWorkerCount: Math.max(0, Math.floor(input.requestedWorkerCount ?? 0)),
+    allocatedWorkerCount: 0,
     routerTracePath: null,
     researchReportPath: null,
     coveragePlanPath: null,
@@ -92,7 +118,50 @@ export function listHardflowJobs(cwd: string): HardflowJob[] {
 }
 
 export function listPendingHardflowJobs(cwd: string): HardflowJob[] {
-  return listHardflowJobs(cwd).filter((job) => job.status === "pending");
+  return listHardflowJobs(cwd)
+    .filter((job) => job.status === "pending")
+    .sort(compareJobPriority);
+}
+
+export function activeSdkWorkerCount(jobs: HardflowJob[]): number {
+  return jobs
+    .filter((job) => job.status === "routing" || job.status === "researching")
+    .reduce((sum, job) => sum + Math.max(0, job.allocatedWorkerCount || job.requestedWorkerCount || 1), 0);
+}
+
+export function requestedWorkerCount(job: HardflowJob): number {
+  return Math.max(1, job.requestedWorkerCount || job.allocatedWorkerCount || 1);
+}
+
+export interface QueueRefreshResult {
+  pending: HardflowJob[];
+  runningJobs: HardflowJob[];
+  activeSdkWorkers: number;
+  availableSdkWorkers: number;
+}
+
+export function refreshHardflowQueueState(cwd: string, config: Pick<DaemonRuntimeConfig, "maxGlobalSdkWorkers" | "pollIntervalMs">): QueueRefreshResult {
+  const jobs = listHardflowJobs(cwd);
+  const pending = jobs.filter((job) => job.status === "pending").sort(compareJobPriority);
+  const runningJobs = jobs.filter((job) => job.status === "routing" || job.status === "researching");
+  const activeWorkers = activeSdkWorkerCount(jobs);
+  const available = Math.max(0, config.maxGlobalSdkWorkers - activeWorkers);
+  let workerWait = 0;
+  pending.forEach((job, index) => {
+    const requested = requestedWorkerCount(job);
+    const patch: Partial<HardflowJob> = {
+      queuePosition: index + 1,
+      estimatedStartAfterMs: index === 0 && requested <= available ? 0 : workerWait + Math.max(1, index) * config.pollIntervalMs
+    };
+    workerWait += requested > available ? config.pollIntervalMs : 0;
+    updateHardflowJob(cwd, job.runId, patch);
+  });
+  return {
+    pending: listPendingHardflowJobs(cwd),
+    runningJobs,
+    activeSdkWorkers: activeWorkers,
+    availableSdkWorkers: available
+  };
 }
 
 export function appendHardflowJobEvent(cwd: string, event: HardflowJobEvent): void {
@@ -110,6 +179,8 @@ export function completeHardflowJob(
   runId: string,
   patch: {
     route: RouterRoute | null;
+    researchScope?: HardflowJob["researchScope"];
+    evidenceNeed?: HardflowJob["evidenceNeed"];
     routerTracePath?: string | null;
     researchReportPath?: string | null;
     coveragePlanPath?: string | null;
@@ -118,11 +189,11 @@ export function completeHardflowJob(
     threadIds?: string[];
   }
 ): HardflowJob {
-  return transitionHardflowJob(cwd, runId, "completed", { ...patch, failureReason: null }, "completed");
+  return transitionHardflowJob(cwd, runId, "completed", { ...patch, allocatedWorkerCount: 0, queuePosition: null, estimatedStartAfterMs: null, failureReason: null }, "completed");
 }
 
 export function failHardflowJob(cwd: string, runId: string, failureReason: string, patch: Partial<HardflowJob> = {}): HardflowJob {
-  return transitionHardflowJob(cwd, runId, "failed", { ...patch, failureReason }, "failed");
+  return transitionHardflowJob(cwd, runId, "failed", { ...patch, allocatedWorkerCount: 0, failureReason }, "failed");
 }
 
 export interface ClaimedHardflowJob {
@@ -156,5 +227,5 @@ export function claimHardflowJob(cwd: string, runId: string, owner = `${process.
 }
 
 export function cancelHardflowJob(cwd: string, runId: string, reason = "cancelled"): HardflowJob {
-  return transitionHardflowJob(cwd, runId, "cancelled", { failureReason: reason }, "cancelled");
+  return transitionHardflowJob(cwd, runId, "cancelled", { allocatedWorkerCount: 0, failureReason: reason }, "cancelled");
 }

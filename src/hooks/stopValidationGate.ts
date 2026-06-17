@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
-import { DEFAULT_LOOP_CONFIG, DEFAULT_TRIGGER_RUNTIME_CONFIG, type TriggerRuntimeConfig } from "../config.js";
-import { currentResearchReportPath, executorManifestPath, legacyResearchReportPath, researchRunReportPath, validationSummaryPath } from "../paths.js";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { DEFAULT_DAEMON_RUNTIME_CONFIG, DEFAULT_LOOP_CONFIG, DEFAULT_TRIGGER_RUNTIME_CONFIG, type TriggerRuntimeConfig } from "../config.js";
+import { currentResearchReportPath, executorManifestPath, legacyResearchReportPath, researchRunReportPath, researchRunSdkThreadsDir, researchRunSdkWorkerStatePath, validationSummaryPath } from "../paths.js";
 import type { CodexDefaultDiscoveryStatus, ResearchAgentRun, ResearchBucketStatus, ResearchReport, ResearcherReport, ValidationSummary } from "../schemas.js";
 import { sanitizeText } from "../sanitizer.js";
 import { incrementBlockCount, markerExpired, resolveCurrentMarker, updateMarker, type HookMarker } from "../hookState.js";
@@ -12,7 +12,9 @@ import { blockingResearchRequests, failedBlockingResearchRequests, listResearchR
 import { readRouterTrace } from "../router/routerTrace.js";
 import type { RouterOutput } from "../router/routerSchema.js";
 import type { RoutePreflightRunner, StrictResearchRunner } from "./hookAutomation.js";
-import { readHardflowJob } from "../jobs/jobStore.js";
+import { readHardflowJob, refreshHardflowQueueState } from "../jobs/jobStore.js";
+import type { HardflowJob } from "../jobs/jobSchema.js";
+import { maybeLoadCoveragePlan } from "../coverage/coveragePlan.js";
 
 type GateOutput = Record<string, unknown>;
 
@@ -54,6 +56,71 @@ function hardBlock(marker: HookMarker, reason: string, hardflowStatus = "strict_
     reason,
     hardflowStatus,
     marker: { turnId: next.turnId, promptHash: next.promptHash, blockCount: next.blockCount, maxBlocks: next.maxBlocks }
+  };
+}
+
+type WorkerProgressState = {
+  bucket?: string;
+  status?: string;
+  currentStep?: string;
+  partialEvidenceCount?: number;
+  sourcesFoundCount?: number;
+  lastHeartbeatAt?: string;
+  failureCategory?: string;
+  retryCount?: number;
+};
+
+function readWorkerProgressStates(cwd: string, runId: string): WorkerProgressState[] {
+  const dir = researchRunSdkThreadsDir(cwd, runId);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const statePath = researchRunSdkWorkerStatePath(cwd, runId, entry.name);
+      if (!existsSync(statePath)) return null;
+      return parseJson<WorkerProgressState>(statePath);
+    })
+    .filter((state): state is WorkerProgressState => Boolean(state));
+}
+
+function hardflowJobProgressSnapshot(cwd: string, job: HardflowJob): Record<string, unknown> {
+  refreshHardflowQueueState(cwd, DEFAULT_DAEMON_RUNTIME_CONFIG);
+  const refreshed = readHardflowJob(cwd, job.runId) ?? job;
+  const plan = maybeLoadCoveragePlan(cwd, job.runId);
+  const report = existsSync(researchRunReportPath(cwd, job.runId)) ? parseJson<ResearchReport>(researchRunReportPath(cwd, job.runId)) : null;
+  const workers = readWorkerProgressStates(cwd, job.runId);
+  const requiredBucketCount = plan?.requiredBucketCount ?? report?.requiredBucketCount ?? report?.required_buckets?.length ?? refreshed.requestedWorkerCount ?? 0;
+  const completedBucketCount = report?.completedRequiredBucketCount ?? workers.filter((worker) => worker.status === "completed").length;
+  const failedBucketCount = workers.filter((worker) => worker.status === "failed" || worker.status === "timeout").length;
+  const runningBucketCount = workers.filter((worker) => worker.status === "running" || worker.status === "pending" || worker.status === "needs_resume").length;
+  const retryingBucketCount = workers.filter((worker) => (worker.retryCount ?? 0) > 0 && worker.status !== "completed" && worker.status !== "failed").length;
+  const coverageScoreSoFar = requiredBucketCount > 0 ? Math.round((completedBucketCount / requiredBucketCount) * 1000) / 10 : 0;
+  return {
+    runId: refreshed.runId,
+    status: refreshed.status,
+    queuePosition: refreshed.queuePosition,
+    estimatedStartAfterMs: refreshed.estimatedStartAfterMs,
+    elapsedMs: Date.now() - Date.parse(refreshed.createdAt),
+    route: refreshed.route,
+    researchScope: refreshed.researchScope ?? plan?.researchScope ?? report?.researchScope ?? null,
+    evidenceNeed: refreshed.evidenceNeed ?? plan?.evidenceNeed ?? report?.evidenceNeed ?? null,
+    requiredBucketCount,
+    completedBucketCount,
+    runningBucketCount,
+    failedBucketCount,
+    retryingBucketCount,
+    coverageScoreSoFar,
+    requestedWorkerCount: refreshed.requestedWorkerCount,
+    allocatedWorkerCount: refreshed.allocatedWorkerCount,
+    currentWorkers: workers.map((worker) => ({
+      bucket: worker.bucket,
+      status: worker.status,
+      currentStep: worker.currentStep,
+      partialEvidenceCount: worker.partialEvidenceCount ?? 0,
+      sourcesFoundCount: worker.sourcesFoundCount ?? 0,
+      lastHeartbeatAt: worker.lastHeartbeatAt,
+      failureCategory: worker.failureCategory || undefined
+    }))
   };
 }
 
@@ -294,7 +361,18 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
       return finish(hardBlock(marker, `HardFlow job is missing for runId=${marker.runId}. Stop hook fails closed; hooks should enqueue .agent/hardflow/jobs/<runId>.json.`, "hardflow_job_missing"));
     }
     if (job.status === "pending" || job.status === "routing" || job.status === "researching") {
-      return finish(hardBlock(marker, `HardFlow job still running or pending. status=${job.status}, runId=${job.runId}. Run codex-hardflow jobs run-once --run-id ${job.runId} or keep daemon running.`, "hardflow_job_pending"));
+      const progressSnapshot = hardflowJobProgressSnapshot(cwd, job);
+      return finish(
+        {
+          ...hardBlock(
+            marker,
+            `HardFlow job is ${job.status}. runId=${job.runId}, queuePosition=${progressSnapshot.queuePosition ?? "unknown"}, requiredBucketCount=${progressSnapshot.requiredBucketCount ?? 0}, completedBucketCount=${progressSnapshot.completedBucketCount ?? 0}. Run codex-hardflow jobs run-once --run-id ${job.runId} or keep daemon running.`,
+            "hardflow_job_pending"
+          ),
+          progressSnapshot
+        },
+        "hardflow_job_pending"
+      );
     }
     if (job.status === "failed") {
       return finish(hardBlock(marker, `HardFlow job failed: ${job.failureReason ?? "missing failureReason"}. Do not answer from ordinary web_search/manual notes unless the user explicitly approves downgrade.`, "hardflow_job_failed"));

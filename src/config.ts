@@ -41,6 +41,9 @@ export interface DaemonRuntimeConfig {
   enabled: boolean;
   pollIntervalMs: number;
   maxConcurrentJobs: number;
+  maxGlobalSdkWorkers: number;
+  maxConcurrentForegroundJobs: number;
+  maxConcurrentBackgroundJobs: number;
 }
 
 export interface RouterRuntimeConfig {
@@ -54,7 +57,10 @@ export interface WorkerRuntimeConfig {
 export const DEFAULT_DAEMON_RUNTIME_CONFIG: DaemonRuntimeConfig = {
   enabled: true,
   pollIntervalMs: 1_000,
-  maxConcurrentJobs: 1
+  maxConcurrentJobs: 4,
+  maxGlobalSdkWorkers: 32,
+  maxConcurrentForegroundJobs: 4,
+  maxConcurrentBackgroundJobs: 2
 };
 
 export const DEFAULT_ROUTER_RUNTIME_CONFIG: RouterRuntimeConfig = {

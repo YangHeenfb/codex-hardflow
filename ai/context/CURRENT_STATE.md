@@ -284,3 +284,60 @@ Safety notes:
 Next action:
 
 - Commit and push the job/daemon architecture changes on `main`.
+
+## Current State Update: Queue, Scope, And Progress Snapshot
+
+Date: 2026-06-17
+
+Branch:
+
+- `main`
+
+Current objective:
+
+- Commit and push the follow-up fix that separates daemon job-level concurrency
+  from SDK worker-level concurrency, exposes queue/progress state, and makes
+  CoveragePlan selection depend on RouterOutput `researchScope` /
+  `evidenceNeed` rather than hardcoded prompt text.
+
+Implementation status:
+
+- Added RouterOutput fields: `researchScope`, `evidenceNeed`,
+  `localDiagnosisRequired`, `externalResearchRequired`, and
+  `exhaustiveCoverageRequired`.
+- Router traces, Source Coverage Matrix, CoveragePlan, and ResearchReport now
+  carry `researchScope` / `evidenceNeed`.
+- Coverage policy now maps:
+  - `local_diagnostic` to `local_repo` only.
+  - `local_plus_external` to `local_repo` plus selected external buckets.
+  - `external_exhaustive` to the full external exhaustive bucket set.
+  - `implementation_support` to local-first support with ResearchRequest later
+    if external evidence becomes necessary.
+- Daemon config now distinguishes user-level job slots from global SDK worker
+  capacity: `maxConcurrentJobs`, foreground/background job limits, and
+  `maxGlobalSdkWorkers`.
+- Job records now include priority, queue position, estimated start delay,
+  foreground/current-turn flags, requested worker count, and allocated worker
+  count.
+- Stop hook pending/running blocks now include a structured
+  `progressSnapshot` with queue position, elapsed time, scope, bucket counts,
+  coverage-so-far, and current worker status.
+
+Verification:
+
+- `npm run build`: passed.
+- `npm test`: passed, 28 test files and 233 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed.
+
+Safety notes:
+
+- No SDK runner concurrency strategy was changed.
+- No computed confidence work was done.
+- No hidden validator runner work was done.
+- No large diagnostics experiment was run.
+- No global files were modified.
+
+Next action:
+
+- Commit and push the queue/scope/progress snapshot fix on `main`.

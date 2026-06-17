@@ -68,6 +68,8 @@ export function buildSourceCoverageMatrix(task: string, options: BuildSourceCove
   return {
     task,
     coverageMode: policy.coverageMode,
+    researchScope: routerOutput.researchScope,
+    evidenceNeed: routerOutput.evidenceNeed,
     rawUserPrompt: options.rawUserPrompt,
     normalizedTask: options.normalizedTask,
     classificationInput: options.classificationInput,

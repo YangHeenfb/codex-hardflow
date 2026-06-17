@@ -26,6 +26,8 @@ export const WORKFLOW_PATTERNS = [
 
 export const RESEARCH_PROFILES = ["none", "light", "broad", "current_state", "competitor", "local_repo_plus_external"] as const;
 export const VALIDATION_PROFILES = ["none", "manifest_only", "public_checks", "hidden_validation", "hidden_validation_with_final_holdout"] as const;
+export const RESEARCH_SCOPES = ["none", "local_diagnostic", "local_plus_external", "external_exhaustive", "implementation_support"] as const;
+export const EVIDENCE_NEEDS = ["none", "local_only", "external_sources_optional", "external_sources_required"] as const;
 export const SOURCE_BUCKET_STATUSES = ["required", "possible", "not_needed"] as const;
 export const ROUTER_RISKS = [
   "ambiguous_task",
@@ -67,6 +69,11 @@ export const RouterOutputSchema = z.object({
   route: z.enum(ROUTES),
   workflowPattern: z.enum(WORKFLOW_PATTERNS),
   researchProfile: z.enum(RESEARCH_PROFILES),
+  researchScope: z.enum(RESEARCH_SCOPES).default("none"),
+  evidenceNeed: z.enum(EVIDENCE_NEEDS).default("none"),
+  localDiagnosisRequired: z.boolean().default(false),
+  externalResearchRequired: z.boolean().default(false),
+  exhaustiveCoverageRequired: z.boolean().default(false),
   validationProfile: z.enum(VALIDATION_PROFILES),
   sourceBuckets: z.array(RouterSourceBucketSchema),
   requiredAgents: z.array(RouterRequiredAgentSchema),
@@ -129,6 +136,11 @@ export interface RouterTrace {
   parallelPolicy: ParallelPolicy | null;
   workflowPattern: RouterOutput["workflowPattern"];
   researchProfile: RouterOutput["researchProfile"];
+  researchScope: RouterOutput["researchScope"];
+  evidenceNeed: RouterOutput["evidenceNeed"];
+  localDiagnosisRequired: boolean;
+  externalResearchRequired: boolean;
+  exhaustiveCoverageRequired: boolean;
   validationProfile: RouterOutput["validationProfile"];
   sourceBuckets: RouterOutput["sourceBuckets"];
   requiredAgents: RouterOutput["requiredAgents"];

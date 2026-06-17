@@ -82,6 +82,57 @@ describe("CoveragePlan and EvidenceLedger", () => {
     expect(plan.requiredBuckets).toEqual([]);
   });
 
+  it("uses researchScope local_diagnostic for local_repo-only coverage", () => {
+    const routerOutput = routerOutputForBuckets(["local_repo"], {
+      researchProfile: "light",
+      researchScope: "local_diagnostic",
+      evidenceNeed: "local_only",
+      localDiagnosisRequired: true,
+      externalResearchRequired: false,
+      exhaustiveCoverageRequired: false
+    });
+    const plan = buildCoveragePlan(routerOutput, "opaque routed local diagnostic task", { runId: "run-local-diagnostic-scope" });
+
+    expect(plan.researchScope).toBe("local_diagnostic");
+    expect(plan.evidenceNeed).toBe("local_only");
+    expect(plan.requiredBuckets).toEqual(["local_repo"]);
+    expect(plan.requiredBuckets).not.toContain("official_docs");
+    expect(plan.requiredBuckets).not.toContain("github");
+  });
+
+  it("uses researchScope local_plus_external for local diagnosis plus selected external sources", () => {
+    const routerOutput = routerOutputForBuckets(["local_repo", "security"], {
+      researchProfile: "local_repo_plus_external",
+      researchScope: "local_plus_external",
+      evidenceNeed: "external_sources_required",
+      localDiagnosisRequired: true,
+      externalResearchRequired: true,
+      exhaustiveCoverageRequired: true
+    });
+    const plan = buildCoveragePlan(routerOutput, "opaque routed project issue solution task", { runId: "run-local-plus-external-scope" });
+
+    expect(plan.researchScope).toBe("local_plus_external");
+    expect(plan.requiredBuckets).toEqual(expect.arrayContaining(["local_repo", "official_docs", "github", "blogs_engineering", "codex_default_discovery", "security"]));
+    expect(plan.requiredBuckets).not.toContain("academic");
+  });
+
+  it("uses researchScope external_exhaustive for broad external research", () => {
+    const routerOutput = routerOutputForBuckets(["official_docs", "github"], {
+      researchScope: "external_exhaustive",
+      evidenceNeed: "external_sources_required",
+      localDiagnosisRequired: false,
+      externalResearchRequired: true,
+      exhaustiveCoverageRequired: true
+    });
+    const plan = buildCoveragePlan(routerOutput, "opaque routed frontier research task", { runId: "run-external-exhaustive-scope" });
+
+    expect(plan.researchScope).toBe("external_exhaustive");
+    expect(plan.requiredBuckets).toEqual(
+      expect.arrayContaining(["official_docs", "github", "community", "academic", "package_registry", "security", "blogs_engineering", "codex_default_discovery"])
+    );
+    expect(plan.requiredBuckets).not.toContain("local_repo");
+  });
+
   it("honors explicit balanced and fast coverage modes with coverage debt for skipped possible buckets", () => {
     const possibleBuckets = [{ bucket: "github", status: "possible", reason: "GitHub might have adjacent examples." }] as RouterOutput["sourceBuckets"];
     const routerOutput = routerOutputForBuckets([], {

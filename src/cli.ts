@@ -1,7 +1,8 @@
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { cliPathStatus } from "./cliPaths.js";
 import { codexRunnerStatus } from "./codexRunner.js";
@@ -298,8 +299,9 @@ function verifyPackageContents(packOutput: string): { passed: boolean; forbidden
 function verifySelf(cwd: string): Record<string, unknown> {
   const pack = spawnSync("npm", ["pack", "--dry-run", "--json"], { cwd, encoding: "utf8", timeout: 120_000 });
   const packCheck = pack.status === 0 ? verifyPackageContents(pack.stdout) : { passed: false, forbidden: ["npm pack failed"], files: [] };
+  const hookSmokeCwd = mkdtempSync(join(tmpdir(), "hardflow-verify-self-"));
   const hookInputs = [
-    ["user-prompt-submit", userPromptSubmit({ prompt: "debug latest framework issue" }, sourceRoot, { config: { autoRouteOnUserPromptSubmit: false } })],
+    ["user-prompt-submit", userPromptSubmit({ cwd: hookSmokeCwd, prompt: "debug latest framework issue" }, sourceRoot, { config: { autoRouteOnUserPromptSubmit: false } })],
     ["pre-tool-use-private-path-guard", preToolUsePrivatePathGuard({ command: "ls src" })],
     ["stop-validation-gate", stopValidationGate({ cwd, hardflowRequired: false })],
     ["subagent-start-context", subagentStartContext()],

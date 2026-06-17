@@ -13,6 +13,10 @@ function additionalContext(result: Record<string, unknown>): string {
 }
 
 describe("UserPromptSubmit job enqueue", () => {
+  function tempRepo(): string {
+    return mkdtempSync(join(tmpdir(), "hardflow-userprompt-"));
+  }
+
   function clearInternalEnv(): void {
     delete process.env.CODEX_HARDFLOW_INTERNAL;
     delete process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE;
@@ -27,10 +31,11 @@ describe("UserPromptSubmit job enqueue", () => {
   afterEach(clearInternalEnv);
 
   it("queues a HardFlow job without running router preflight", () => {
+    const cwd = tempRepo();
     let routeCalls = 0;
     const result = userPromptSubmit(
       {
-        cwd: process.cwd(),
+        cwd,
         prompt: "What are current best practices for AI agent framework evaluation?",
         turnId: "turn-userprompt-research"
       },
@@ -42,7 +47,7 @@ describe("UserPromptSubmit job enqueue", () => {
         }
       }
     );
-    const job = readHardflowJob(process.cwd(), "run-turn-userprompt-research");
+    const job = readHardflowJob(cwd, "run-turn-userprompt-research");
 
     expect(result.decision).toBe("allow");
     expect((result.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
@@ -183,9 +188,10 @@ describe("UserPromptSubmit job enqueue", () => {
   });
 
   it("includes local_repo and competitor researcher names in queued-job context", () => {
+    const cwd = tempRepo();
     const result = userPromptSubmit(
       {
-        cwd: process.cwd(),
+        cwd,
         prompt: "我现在这个项目做的multi agent结构有什么类似的产品或者项目？有哪些我可以吸收改进的？",
         turnId: "turn-userprompt-local-competitors"
       },
@@ -201,9 +207,10 @@ describe("UserPromptSubmit job enqueue", () => {
   });
 
   it("injects job command for agentic long horizon work prompts", () => {
+    const cwd = tempRepo();
     const result = userPromptSubmit(
       {
-        cwd: process.cwd(),
+        cwd,
         prompt: "What are current practical solutions for agentic long horizon work? 中文回答",
         turnId: "turn-agentic-long-horizon"
       },
@@ -217,9 +224,10 @@ describe("UserPromptSubmit job enqueue", () => {
   });
 
   it("injects job command for hidden validation solution prompts", () => {
+    const cwd = tempRepo();
     const result = userPromptSubmit(
       {
-        cwd: process.cwd(),
+        cwd,
         prompt: "Find current practical hidden validation solutions for AI coding agents",
         turnId: "turn-hidden-validation-solutions"
       },
@@ -231,20 +239,22 @@ describe("UserPromptSubmit job enqueue", () => {
   });
 
   it("queues even simple prompts for daemon routing without blocking in UserPromptSubmit", () => {
-    const simple = userPromptSubmit({ prompt: "translate hello to Chinese" }, process.cwd());
+    const cwd = tempRepo();
+    const simple = userPromptSubmit({ cwd, prompt: "translate hello to Chinese" }, process.cwd());
     expect(simple.decision).toBe("allow");
     expect((simple.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
     expect(additionalContext(simple)).toContain("queued a HardFlow job");
     expect(additionalContext(simple)).not.toContain("research --runner app_handoff");
-    const bypass = userPromptSubmit({ prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd());
+    const bypass = userPromptSubmit({ cwd, prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd());
     expect(bypass.decision).toBe("allow");
     expect(additionalContext(bypass)).toContain("jobs run-once --run-id run-turn-bypass");
   });
 
   it("keeps developer entrypoint warnings out of normal App instructions", () => {
+    const cwd = tempRepo();
     const result = userPromptSubmit(
       {
-        cwd: process.cwd(),
+        cwd,
         prompt: "修复 codex-hardflow developer maintenance，明确需要检查 tsx dev entrypoint",
         turnId: "turn-maintenance-dev-entrypoint"
       },

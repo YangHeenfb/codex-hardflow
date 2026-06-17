@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run tests",
     "dev": "tsx src/cli.ts",
     "hardflow": "tsx src/cli.ts",
     "verify": "npm run build && npm test && node dist/cli.js verify:self"

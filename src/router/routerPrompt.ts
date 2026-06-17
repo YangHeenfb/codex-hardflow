@@ -80,6 +80,8 @@ export function buildRouterPrompt(input: RouterInput): string {
     "- Simple explanation, translation, rewriting, or casual questions should not trigger hardflow.",
     "- If the user semantically asks not to use hardflow or asks for a quick answer, set route=bypass semantically, not by keyword rule.",
     "- route=research means automatic strict_programmatic research with coverageMode=exhaustive and parallelPolicy=all_required. Do not route research to App subagents or manual fallback.",
+    "- Set researchScope/evidenceNeed semantically. Use local_diagnostic for repo-only hardflow/project diagnosis, local_plus_external for project diagnosis plus outside solutions, external_exhaustive for broad current-source research, and implementation_support for code changes that may later need ResearchRequest.",
+    "- Set localDiagnosisRequired, externalResearchRequired, and exhaustiveCoverageRequired from intent. Do not use keyword rules as the primary route.",
     "- route=implementation starts from local_repo. If external docs/examples/security/version/current behavior or troubleshooting evidence is needed, the executor must create a ResearchRequest instead of guessing.",
     "- route=validation_sensitive_implementation requires executor manifest and validation/final-holdout gates when code changes are made; if external safety evidence is needed, require strict_programmatic research.",
     "- AGENTS.md and the codex-hardflow skill are protocol documentation only, not trigger sources.",
@@ -88,6 +90,8 @@ export function buildRouterPrompt(input: RouterInput): string {
     "Allowed route values: direct_answer, research, implementation, validation_sensitive_implementation, parallel_modules, hardflow_maintenance, bypass, clarify, router_failed.",
     "Allowed workflowPattern values: direct, router, parallel_research, sequential_pipeline, orchestrator_workers, evaluator_optimizer, parallel_modules, repair_loop.",
     "Allowed researchProfile values: none, light, broad, current_state, competitor, local_repo_plus_external.",
+    "Allowed researchScope values: none, local_diagnostic, local_plus_external, external_exhaustive, implementation_support.",
+    "Allowed evidenceNeed values: none, local_only, external_sources_optional, external_sources_required.",
     "Allowed validationProfile values: none, manifest_only, public_checks, hidden_validation, hidden_validation_with_final_holdout.",
     "Allowed source bucket values: local_repo, official_docs, github, community, academic, package_registry, security, blogs_engineering, competitors, private_connectors, codex_default_discovery.",
     "Allowed risk values: ambiguous_task, may_need_current_info, may_need_private_context, may_need_hidden_validation, may_need_parallel_isolation, high_prompt_injection_risk, high_cost_or_latency.",
@@ -106,7 +110,7 @@ export function buildRouterPrompt(input: RouterInput): string {
     `Raw user prompt:\n${input.rawUserPrompt}`,
     input.normalizedTask ? `Normalized task:\n${input.normalizedTask}` : "",
     "",
-    "Return JSON with keys: route, workflowPattern, researchProfile, validationProfile, sourceBuckets, requiredAgents, requiresSourceMatrix, requiresExecutorManifest, requiresValidation, requiresFinalHoldout, requiresParallelIsolation, reasons, risks, bypass."
+    "Return JSON with keys: route, workflowPattern, researchProfile, researchScope, evidenceNeed, localDiagnosisRequired, externalResearchRequired, exhaustiveCoverageRequired, validationProfile, sourceBuckets, requiredAgents, requiresSourceMatrix, requiresExecutorManifest, requiresValidation, requiresFinalHoldout, requiresParallelIsolation, reasons, risks, bypass."
   ]
     .filter(Boolean)
     .join("\n");

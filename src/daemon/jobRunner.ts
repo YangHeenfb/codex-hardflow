@@ -1,13 +1,26 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
 import { hardflowRunCodexHome, researchRunCoveragePlanPath, researchRunEvidenceLedgerPath, researchRunReportPath, researchRunRouterTracePath } from "../paths.js";
 import { internalEnvFor } from "../internalEnv.js";
-import { completeHardflowJob, failHardflowJob, readHardflowJob, transitionHardflowJob, updateHardflowJob, claimHardflowJob, listPendingHardflowJobs } from "../jobs/jobStore.js";
+import {
+  activeSdkWorkerCount,
+  claimHardflowJob,
+  completeHardflowJob,
+  failHardflowJob,
+  listHardflowJobs,
+  listPendingHardflowJobs,
+  readHardflowJob,
+  refreshHardflowQueueState,
+  requestedWorkerCount,
+  transitionHardflowJob,
+  updateHardflowJob
+} from "../jobs/jobStore.js";
 import type { HardflowJob } from "../jobs/jobSchema.js";
 import { runRouterProvider, type RouterProviderContext } from "../router/providers/index.js";
 import { runResearch } from "../researchOrchestrator.js";
 import { listSdkWorkerStates, type SdkResearchStepRunner } from "../research/sdkResearchRunner.js";
 import type { RouterOutput } from "../router/routerSchema.js";
+import { prepareIsolatedCodexHome } from "../codexHomeIsolation.js";
+import { buildCoveragePlan } from "../coverage/coveragePlan.js";
+import { DEFAULT_DAEMON_RUNTIME_CONFIG, type DaemonRuntimeConfig } from "../config.js";
 
 export interface RunJobOnceOptions {
   routerTimeoutMs?: number;
@@ -17,14 +30,13 @@ export interface RunJobOnceOptions {
   sdkAvailable?: boolean;
 }
 
+export interface RunPendingJobsOptions extends RunJobOnceOptions {
+  daemonConfig?: Partial<DaemonRuntimeConfig>;
+}
+
 function prepareDaemonCodexHome(cwd: string, runId: string): string {
   const codexHome = hardflowRunCodexHome(cwd, runId);
-  mkdirSync(codexHome, { recursive: true });
-  for (const forbidden of ["hooks.json", "AGENTS.md"]) {
-    const target = `${codexHome}/${forbidden}`;
-    if (existsSync(target)) rmSync(target, { recursive: true, force: true });
-  }
-  return codexHome;
+  return prepareIsolatedCodexHome(codexHome);
 }
 
 async function withDaemonWorkerEnv<T>(cwd: string, runId: string, run: () => Promise<T>): Promise<T> {
@@ -94,6 +106,8 @@ export async function processHardflowJob(job: HardflowJob, options: RunJobOnceOp
   if (routeResult.output.route === "router_failed") {
     return failHardflowJob(job.cwd, job.runId, routeResult.trace.fallbackReason ?? routeResult.output.reasons[0] ?? "router failed", {
       route: "router_failed",
+      researchScope: routeResult.output.researchScope,
+      evidenceNeed: routeResult.output.evidenceNeed,
       routerTracePath,
       isolatedCodexHome
     });
@@ -102,6 +116,8 @@ export async function processHardflowJob(job: HardflowJob, options: RunJobOnceOp
   if (routeResult.output.route === "direct_answer" || routeResult.output.route === "bypass") {
     return completeHardflowJob(job.cwd, job.runId, {
       route: routeResult.output.route,
+      researchScope: routeResult.output.researchScope,
+      evidenceNeed: routeResult.output.evidenceNeed,
       routerTracePath,
       isolatedCodexHome,
       threadIds: []
@@ -111,13 +127,34 @@ export async function processHardflowJob(job: HardflowJob, options: RunJobOnceOp
   if (routeResult.output.route !== "research") {
     return completeHardflowJob(job.cwd, job.runId, {
       route: routeResult.output.route,
+      researchScope: routeResult.output.researchScope,
+      evidenceNeed: routeResult.output.evidenceNeed,
       routerTracePath,
       isolatedCodexHome,
       threadIds: []
     });
   }
 
-  transitionHardflowJob(job.cwd, job.runId, "researching", { route: "research", routerTracePath, isolatedCodexHome }, "research_started");
+  const plannedWorkerCount = buildCoveragePlan(routeResult.output, job.rawUserPrompt, {
+    runId: job.runId,
+    coverageMode: job.coverageMode
+  }).requiredBucketCount;
+  transitionHardflowJob(
+    job.cwd,
+    job.runId,
+    "researching",
+    {
+      route: "research",
+      researchScope: routeResult.output.researchScope,
+      evidenceNeed: routeResult.output.evidenceNeed,
+      routerTracePath,
+      isolatedCodexHome,
+      priority: routeResult.output.researchScope === "local_diagnostic" ? "high" : job.priority,
+      requestedWorkerCount: plannedWorkerCount,
+      allocatedWorkerCount: Math.max(1, plannedWorkerCount)
+    },
+    "research_started"
+  );
   const report = await withDaemonWorkerEnv(job.cwd, job.runId, () =>
     runResearch(job.rawUserPrompt, job.cwd, {
       rawUserPrompt: job.rawUserPrompt,
@@ -142,6 +179,8 @@ export async function processHardflowJob(job: HardflowJob, options: RunJobOnceOp
   if (report.status === "failed") {
     return failHardflowJob(job.cwd, job.runId, report.failure_reason ?? "strict research failed", {
       route: "research",
+      researchScope: routeResult.output.researchScope,
+      evidenceNeed: routeResult.output.evidenceNeed,
       routerTracePath,
       researchReportPath: researchRunReportPath(job.cwd, job.runId),
       coveragePlanPath: researchRunCoveragePlanPath(job.cwd, job.runId),
@@ -152,6 +191,8 @@ export async function processHardflowJob(job: HardflowJob, options: RunJobOnceOp
   }
   return completeHardflowJob(job.cwd, job.runId, {
     route: "research",
+    researchScope: routeResult.output.researchScope,
+    evidenceNeed: routeResult.output.evidenceNeed,
     routerTracePath,
     researchReportPath: researchRunReportPath(job.cwd, job.runId),
     coveragePlanPath: researchRunCoveragePlanPath(job.cwd, job.runId),
@@ -177,10 +218,32 @@ export async function runHardflowJobOnce(cwd: string, runId: string, options: Ru
   }
 }
 
-export async function runPendingHardflowJobs(cwd: string, options: RunJobOnceOptions = {}): Promise<HardflowJob[]> {
-  const results: HardflowJob[] = [];
+export async function runPendingHardflowJobs(cwd: string, options: RunPendingJobsOptions = {}): Promise<HardflowJob[]> {
+  const config = { ...DEFAULT_DAEMON_RUNTIME_CONFIG, ...(options.daemonConfig ?? {}) };
+  refreshHardflowQueueState(cwd, config);
+  const jobs = listHardflowJobs(cwd);
+  let runningJobs = jobs.filter((job) => job.status === "routing" || job.status === "researching").length;
+  let runningForeground = jobs.filter((job) => (job.status === "routing" || job.status === "researching") && job.foreground).length;
+  let runningBackground = jobs.filter((job) => (job.status === "routing" || job.status === "researching") && !job.foreground).length;
+  let activeWorkers = activeSdkWorkerCount(jobs);
+  const selected: HardflowJob[] = [];
   for (const job of listPendingHardflowJobs(cwd)) {
+    const requested = requestedWorkerCount(job);
+    if (runningJobs >= config.maxConcurrentJobs) continue;
+    if (job.foreground && runningForeground >= config.maxConcurrentForegroundJobs) continue;
+    if (!job.foreground && runningBackground >= config.maxConcurrentBackgroundJobs) continue;
+    if (activeWorkers + requested > config.maxGlobalSdkWorkers) continue;
+    selected.push(job);
+    runningJobs += 1;
+    if (job.foreground) runningForeground += 1;
+    else runningBackground += 1;
+    activeWorkers += requested;
+    updateHardflowJob(cwd, job.runId, { allocatedWorkerCount: requested }, "worker_budget_reserved");
+  }
+  const results: HardflowJob[] = [];
+  for (const job of selected) {
     results.push(await runHardflowJobOnce(cwd, job.runId, options));
   }
+  refreshHardflowQueueState(cwd, config);
   return results;
 }

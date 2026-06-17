@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname } from "node:path";
 import { buildRouterPrompt } from "../routerPrompt.js";
 import type { RouterInput } from "../routerSchema.js";
 import { internalEnvFor } from "../../internalEnv.js";
+import { prepareIsolatedCodexHome } from "../../codexHomeIsolation.js";
+
+export { prepareIsolatedCodexHome };
 
 export interface CodexCliRouterOptions {
   cwd: string;
@@ -11,16 +12,6 @@ export interface CodexCliRouterOptions {
   runId: string;
   timeoutMs?: number;
   codexCommand?: string;
-}
-
-export function prepareIsolatedCodexHome(codexHome: string): string {
-  mkdirSync(codexHome, { recursive: true });
-  for (const forbidden of ["hooks.json", "AGENTS.md"]) {
-    const target = `${codexHome}/${forbidden}`;
-    if (existsSync(target)) rmSync(target, { recursive: true, force: true });
-  }
-  mkdirSync(dirname(codexHome), { recursive: true });
-  return codexHome;
 }
 
 function sanitizeOutput(value: string): string {
@@ -38,7 +29,7 @@ export async function runCodexCliRouterPrompt(input: RouterInput, options: Codex
     "daemon_router",
     options.runId
   );
-  const result = spawnSync(options.codexCommand ?? "codex", ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "-a", "never"], {
+  const result = spawnSync(options.codexCommand ?? "codex", ["exec", "--skip-git-repo-check", "--ignore-rules", "--sandbox", "read-only"], {
     cwd: options.cwd,
     env,
     input: prompt,

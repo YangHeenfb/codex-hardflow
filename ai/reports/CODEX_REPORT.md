@@ -493,3 +493,123 @@ Next Codex prompt request:
 
 - Please provide the exact next prompt the user should give Codex to address any
   review findings or proceed with the next implementation step.
+
+## Report Entry: Queue, Scope, And Progress Snapshot
+
+### Task
+
+Fix codex-hardflow job/daemon behavior so queueing is visible, job-level
+concurrency is distinct from SDK worker-level concurrency, and CoveragePlan
+selection is driven by structured RouterOutput scope fields rather than
+keyword/rule-based special cases.
+
+### Files Changed
+
+- `.gitignore`
+- `package.json`
+- `src/cli.ts`
+- `src/codexHomeIsolation.ts`
+- `src/config.ts`
+- `src/coverage/coveragePlan.ts`
+- `src/coverage/coveragePolicy.ts`
+- `src/daemon/daemon.ts`
+- `src/daemon/jobRunner.ts`
+- `src/diagnostics/sdkDiagnostics.ts`
+- `src/hooks/stopValidationGate.ts`
+- `src/jobs/jobSchema.ts`
+- `src/jobs/jobStore.ts`
+- `src/research/researchRequest.ts`
+- `src/researchOrchestrator.ts`
+- `src/router/providers/codexCli.ts`
+- `src/router/routerFallback.ts`
+- `src/router/routerNormalize.ts`
+- `src/router/routerPrompt.ts`
+- `src/router/routerSchema.ts`
+- `src/router/routerTrace.ts`
+- `src/schemas.ts`
+- `src/sourceMatrix.ts`
+- `tests/codexCliRouterProvider.test.ts`
+- `tests/coveragePlan.test.ts`
+- `tests/jobDaemon.test.ts`
+- `tests/router.test.ts`
+- `tests/routerFixtures.ts`
+- `tests/userPromptSubmit.test.ts`
+- `tests/validationLoop.test.ts`
+- `vitest.config.ts`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Summary
+
+- Added structured RouterOutput scope fields: `researchScope`, `evidenceNeed`,
+  `localDiagnosisRequired`, `externalResearchRequired`, and
+  `exhaustiveCoverageRequired`.
+- CoveragePlan now maps `local_diagnostic`, `local_plus_external`,
+  `external_exhaustive`, and `implementation_support` to different bucket
+  requirements without hardcoded prompt-text tests.
+- Daemon status now reports pending/running/queued jobs, global SDK worker
+  capacity, active/available workers, and next jobs by priority.
+- Jobs now record priority, foreground/current-turn flags, queue position,
+  estimated start delay, requested workers, and allocated workers.
+- `runPendingHardflowJobs` respects job slots and global SDK worker budget; jobs
+  that exceed capacity remain pending instead of failing.
+- Stop hook block output now includes a structured `progressSnapshot` so users
+  can see queue position and worker/bucket progress.
+
+### Verification Commands
+
+- `npm run build`: passed.
+- `npm test`: passed, 28 test files and 233 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed.
+
+### Safety Checklist
+
+- [x] Did not change SDK runner concurrency strategy.
+- [x] Did not do computed confidence.
+- [x] Did not do hidden validator runner work.
+- [x] Did not run large diagnostics experiments.
+- [x] Did not modify global files.
+- [x] Did not use keyword text matching as the new coverage routing mechanism.
+- [x] Updated `ai/context/CURRENT_STATE.md`.
+- [x] Updated `ai/reports/CODEX_REPORT.md`.
+
+### Risks And Follow-Ups
+
+- Daemon scheduling is conservative and single-process; production supervision
+  and multi-process job claiming can be improved later.
+- `estimatedStartAfterMs` is a simple queue estimate, not a runtime prediction.
+- Future work can add richer worker telemetry to job status without changing the
+  Stop gate contract.
+
+### Next ChatGPT Question
+
+Please review the queue/scope/progress snapshot fix using:
+
+- uploaded files and the current `main` diff first;
+- `ai/context/CURRENT_STATE.md`;
+- `ai/context/PROJECT_CONTEXT.md`;
+- `ai/context/REVIEW_PROTOCOL.md`;
+- `ai/reports/CODEX_REPORT.md`;
+- old chat memory only as unverified context.
+
+Known anomalies:
+
+- Some support files for Codex-home isolation and test scoping were already
+  dirty before this follow-up, but they are required by the current build/test
+  state and are included in this milestone.
+- No real SDK diagnostics experiment was run in this step.
+- No global install was run for this change.
+
+Expected output format:
+
+- Review findings first.
+- Then state whether the queue/scope/progress model satisfies the intended
+  daemon architecture.
+- Then list missing tests, docs, or operational gaps.
+- Then provide the next Codex-ready prompt.
+
+Next Codex prompt request:
+
+- Please provide the exact next prompt the user should give Codex to address any
+  review findings or proceed with the next implementation step.

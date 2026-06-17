@@ -49,6 +49,8 @@ function isResearchLike(routerOutput: RouterOutput, classification: TaskClassifi
 
 export function resolveCoverageMode(routerOutput: RouterOutput, task: string, explicitMode?: CoverageMode): CoverageMode | undefined {
   if (explicitMode) return explicitMode;
+  if (routerOutput.researchScope === "none" || routerOutput.evidenceNeed === "none") return undefined;
+  if (routerOutput.exhaustiveCoverageRequired || routerOutput.route === "research" || routerOutput.requiresSourceMatrix) return "exhaustive";
   const classification = safetyHeuristics(task);
   if (!isResearchLike(routerOutput, classification)) return undefined;
   return "exhaustive";
@@ -101,6 +103,15 @@ function routerReason(routerOutput: RouterOutput, bucket: string): string | unde
   return routerOutput.sourceBuckets.find((item) => item.bucket === bucket)?.reason;
 }
 
+function routerBucketStatus(routerOutput: RouterOutput, bucket: string): "required" | "possible" | "not_needed" | undefined {
+  return routerOutput.sourceBuckets.find((item) => item.bucket === bucket)?.status;
+}
+
+function routerHasApplicableBucket(routerOutput: RouterOutput, bucket: string): boolean {
+  const status = routerBucketStatus(routerOutput, bucket);
+  return status === "required" || status === "possible";
+}
+
 function applyRouterBuckets(routerOutput: RouterOutput, mode: CoverageMode | undefined, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>, excluded: Map<string, ExcludedBucket>): void {
   for (const item of routerOutput.sourceBuckets) {
     if (item.status === "not_needed") {
@@ -127,62 +138,112 @@ function applyRouterBuckets(routerOutput: RouterOutput, mode: CoverageMode | und
   }
 }
 
-function applyExhaustiveDefaults(task: string, routerOutput: RouterOutput, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>, excluded: Map<string, ExcludedBucket>): void {
-  const researchLike = isResearchLike(routerOutput, classification);
-  if (researchLike) {
-    for (const bucket of EXHAUSTIVE_BASE_BUCKETS) {
-      upsertBucket(
-        buckets,
-        bucket,
-        {
-          required: true,
-          status: "required",
-          reason: routerReason(routerOutput, bucket) ?? "Exhaustive coverage requires this bucket because it has a non-trivial chance of useful research signal."
-        },
-        classification
-      );
-    }
+function requireBucket(
+  routerOutput: RouterOutput,
+  classification: TaskClassification,
+  buckets: Map<string, CoverageBucketDecision>,
+  bucket: string,
+  reason: string,
+  priority?: BucketPriority
+): void {
+  const sourceReason = routerReason(routerOutput, bucket);
+  const status = routerBucketStatus(routerOutput, bucket);
+  const resolvedReason = sourceReason
+    ? status === "possible"
+      ? `${sourceReason} Upgraded to required by exhaustive coverage mode.`
+      : sourceReason
+    : reason;
+  upsertBucket(
+    buckets,
+    bucket,
+    {
+      required: true,
+      status: "required",
+      reason: resolvedReason,
+      priority
+    },
+    classification
+  );
+}
+
+function requireExternalBase(routerOutput: RouterOutput, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>): void {
+  for (const bucket of EXHAUSTIVE_BASE_BUCKETS) {
+    requireBucket(routerOutput, classification, buckets, bucket, "Exhaustive external coverage requires this bucket because it has a non-trivial chance of useful research signal.");
   }
-  if (classification.localRepoRelevant || classification.implementation || routerOutput.researchProfile === "local_repo_plus_external") {
+}
+
+function requireLocalPlusBase(routerOutput: RouterOutput, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>): void {
+  requireBucket(routerOutput, classification, buckets, "local_repo", "Local plus external coverage requires local repository diagnosis.", "critical");
+  for (const bucket of ["official_docs", "github", "blogs_engineering", "codex_default_discovery"]) {
+    requireBucket(routerOutput, classification, buckets, bucket, "Local plus external coverage requires this external bucket for solution grounding.");
+  }
+}
+
+function requireRouterApplicableBuckets(routerOutput: RouterOutput, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>, excluded: Map<string, ExcludedBucket>): void {
+  for (const item of routerOutput.sourceBuckets) {
+    if (item.status === "not_needed") {
+      excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as logically not needed.");
+      continue;
+    }
+    requireBucket(routerOutput, classification, buckets, item.bucket, `${item.bucket} was selected by RouterOutput sourceBuckets.`);
+  }
+}
+
+function applyExhaustiveDefaults(task: string, routerOutput: RouterOutput, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>, excluded: Map<string, ExcludedBucket>): void {
+  const scope = routerOutput.researchScope;
+  for (const item of routerOutput.sourceBuckets) {
+    if (item.status === "not_needed") excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as logically not needed.");
+  }
+
+  if (scope === "none") {
+    void task;
+    return;
+  }
+
+  if (scope === "local_diagnostic") {
+    requireBucket(routerOutput, classification, buckets, "local_repo", "Local diagnostic scope requires current repository evidence.", "critical");
+    if (routerOutput.externalResearchRequired || routerOutput.evidenceNeed === "external_sources_required") {
+      requireLocalPlusBase(routerOutput, classification, buckets);
+      requireRouterApplicableBuckets(routerOutput, classification, buckets, excluded);
+    }
+  } else if (scope === "local_plus_external") {
+    requireLocalPlusBase(routerOutput, classification, buckets);
+    for (const bucket of ["security", "package_registry", "academic", "community", "competitors"]) {
+      if (routerHasApplicableBucket(routerOutput, bucket)) requireBucket(routerOutput, classification, buckets, bucket, `${bucket} was selected by RouterOutput for local plus external coverage.`);
+    }
+    if (routerBucketStatus(routerOutput, "private_connectors") === "required") {
+      requireBucket(routerOutput, classification, buckets, "private_connectors", "Router requested private/internal connector evidence.");
+    }
+  } else if (scope === "external_exhaustive") {
+    requireExternalBase(routerOutput, classification, buckets);
+    if (routerHasApplicableBucket(routerOutput, "competitors") || routerOutput.researchProfile === "competitor") {
+      requireBucket(routerOutput, classification, buckets, "competitors", "Router requested competitors, alternatives, or comparison evidence.", "critical");
+    }
+    if (routerHasApplicableBucket(routerOutput, "local_repo") || routerOutput.researchProfile === "local_repo_plus_external") {
+      requireBucket(routerOutput, classification, buckets, "local_repo", "Router requested current repository context alongside external research.", "critical");
+    }
+    if (routerBucketStatus(routerOutput, "private_connectors") === "required") {
+      requireBucket(routerOutput, classification, buckets, "private_connectors", "Router requested private/internal connector evidence.");
+    }
+  } else if (scope === "implementation_support") {
     upsertBucket(
       buckets,
       "local_repo",
       {
         required: true,
         status: "required",
-        reason: routerReason(routerOutput, "local_repo") ?? "Current project, repository, codebase, or implementation context requires local repository evidence.",
+        reason: routerReason(routerOutput, "local_repo") ?? "Implementation support starts from current repository evidence.",
         priority: "critical"
       },
       classification
     );
+    if (routerOutput.externalResearchRequired || routerOutput.evidenceNeed === "external_sources_required") {
+      requireLocalPlusBase(routerOutput, classification, buckets);
+      requireRouterApplicableBuckets(routerOutput, classification, buckets, excluded);
+    }
   }
-  if (classification.competitorRelevant || routerOutput.researchProfile === "competitor" || routerOutput.researchProfile === "local_repo_plus_external") {
-    upsertBucket(
-      buckets,
-      "competitors",
-      {
-        required: true,
-        status: "required",
-        reason: routerReason(routerOutput, "competitors") ?? "Comparison, alternatives, inspiration, or adjacent project discovery requires competitor evidence.",
-        priority: "critical"
-      },
-      classification
-    );
-  }
-  if (classification.privateConnectorsExplicit) {
-    upsertBucket(
-      buckets,
-      "private_connectors",
-      {
-        required: true,
-        status: "required",
-        reason: routerReason(routerOutput, "private_connectors") ?? "The user explicitly requested private or internal context."
-      },
-      classification
-    );
-  } else {
-    excludeBucket(excluded, "private_connectors", "Private/internal connectors were not explicitly requested by the user.");
-  }
+
+  if (routerBucketStatus(routerOutput, "private_connectors") !== "required") excludeBucket(excluded, "private_connectors", "Private/internal connectors require explicit private/internal context from RouterOutput.");
   void task;
 }
 
@@ -211,9 +272,11 @@ export function expandCoveragePolicy(routerOutput: RouterOutput, task: string, e
   const coverageMode = resolveCoverageMode(routerOutput, task, explicitMode);
   const buckets = new Map<string, CoverageBucketDecision>();
   const excluded = new Map<string, ExcludedBucket>();
-  applyRouterBuckets(routerOutput, coverageMode, classification, buckets, excluded);
   if (coverageMode === "exhaustive") applyExhaustiveDefaults(task, routerOutput, classification, buckets, excluded);
-  else applyBalancedProfileDefaults(routerOutput, classification, buckets);
+  else {
+    applyRouterBuckets(routerOutput, coverageMode, classification, buckets, excluded);
+    applyBalancedProfileDefaults(routerOutput, classification, buckets);
+  }
 
   const activeBuckets = [...buckets.values()].filter((bucket) => !excluded.has(bucket.bucket));
   const skippedPossibleBuckets = coverageMode === "exhaustive" ? [] : activeBuckets.filter((bucket) => !bucket.required).map((bucket) => bucket.bucket);

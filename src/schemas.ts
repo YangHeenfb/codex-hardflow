@@ -21,6 +21,8 @@ export type ResearchEvidenceMode = "none" | "manual_backfilled" | "app_handoff" 
 export type ResearchReportStatus = "completed" | "degraded" | "failed";
 export type ResearchBucketStatus = "completed" | "searched_but_no_signal" | "failed" | "timeout" | "manual_fallback" | "manual_backfilled" | "context_exhausted";
 export type CoverageMode = "exhaustive" | "balanced" | "fast";
+export type ResearchScope = "none" | "local_diagnostic" | "local_plus_external" | "external_exhaustive" | "implementation_support";
+export type EvidenceNeed = "none" | "local_only" | "external_sources_optional" | "external_sources_required";
 export type BucketPriority = "critical" | "normal" | "low";
 export type ParallelPolicy = "all_required" | "fixed" | "adaptive" | "wave";
 export type RouteStatus = "router_required" | "routed" | "router_ready" | "router_failed" | "not_required";
@@ -98,6 +100,8 @@ export interface ExcludedBucket {
 export interface SourceCoverageMatrix {
   task: string;
   coverageMode?: CoverageMode;
+  researchScope?: ResearchScope;
+  evidenceNeed?: EvidenceNeed;
   rawUserPrompt?: string;
   normalizedTask?: string;
   classificationInput?: string;
@@ -310,6 +314,8 @@ export interface ResearchReport {
   router_trace_stale_reason?: string;
   source_matrix: SourceCoverageMatrix;
   coverageMode?: CoverageMode;
+  researchScope?: ResearchScope;
+  evidenceNeed?: EvidenceNeed;
   parallelPolicy?: ParallelPolicy;
   required_buckets: string[];
   requiredBucketCount?: number;

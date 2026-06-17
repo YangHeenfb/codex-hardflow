@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { researchRunCoveragePlanPath } from "../paths.js";
 import type { RouterOutput } from "../router/routerSchema.js";
-import type { BucketPriority, CoverageMode, ExcludedBucket } from "../schemas.js";
+import type { BucketPriority, CoverageMode, EvidenceNeed, ExcludedBucket, ResearchScope } from "../schemas.js";
 import { expandCoveragePolicy } from "./coveragePolicy.js";
 import { searchEngineNamesForBucket, searchEnginesForBucket } from "./searchEngineRegistry.js";
 
@@ -41,6 +41,8 @@ export interface CoveragePlanSearchEngine {
 export interface CoveragePlan {
   runId: string;
   coverageMode?: CoverageMode;
+  researchScope?: ResearchScope;
+  evidenceNeed?: EvidenceNeed;
   rawUserPrompt: string;
   normalizedTask: string;
   route: string;
@@ -184,6 +186,8 @@ export function buildCoveragePlan(routerOutput: RouterOutput, rawUserPrompt: str
   return {
     runId: options.runId,
     coverageMode: policy.coverageMode,
+    researchScope: routerOutput.researchScope,
+    evidenceNeed: routerOutput.evidenceNeed,
     rawUserPrompt,
     normalizedTask: options.normalizedTask ?? rawUserPrompt,
     route: routerOutput.route,
