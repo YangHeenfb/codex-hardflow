@@ -1,5 +1,55 @@
 # Current State
 
+## Current Snapshot: Status File Policy Update
+
+Last updated: 2026-06-18
+
+Branch:
+
+- `main`
+- Current HEAD: `5239ede Fix router excluded bucket handling`
+
+Current objective:
+
+- Persist the repository rule that Codex updates durable state files after every
+  code, documentation, or configuration change.
+- Remove the old required next-question handoff policy and existing stored
+  question blocks from active project handoff files.
+
+Files changed in this update:
+
+- `AGENTS.md`
+- `ai/README.md`
+- `ai/plans/TEMPLATE.md`
+- `ai/decisions/DECISION_LOG.md`
+- `.github/pull_request_template.md`
+- `ai/context/REVIEW_PROTOCOL.md`
+- `ai/context/LEGACY_CONTEXT_BACKFILL.en.md`
+- `ai/context/LEGACY_CONTEXT_BACKFILL.zh.md`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+- `ai/plans/2026-06-11-all-parallel-stress.md`
+
+Current rule:
+
+- After every code, documentation, or configuration change, update
+  `ai/context/CURRENT_STATE.md` and `ai/reports/CODEX_REPORT.md`.
+- Status updates should record the change summary, verification status, and any
+  current risks or open follow-up.
+
+Verification for this docs-only update:
+
+- Text search confirmed the old next-question requirement strings no longer
+  appear in active project handoff files.
+- No npm build/test/verify run yet for this documentation-only edit.
+
+Safety / scope notes:
+
+- No product source code was changed.
+- No SDK runner, daemon/job, hidden validator, computed confidence, or
+  diagnostics experiment work was done.
+- No global files were modified and no `install-global` was run.
+
 ## Current Snapshot
 
 Last updated: 2026-06-18
@@ -90,33 +140,6 @@ Next action:
 - If the user asks, commit and push only these handoff/status-file updates.
 - Otherwise, continue implementation from current `main`; the old all-parallel
   plan remains historical context, not the active task plan.
-
-Next ChatGPT question:
-
-Please review the current codex-hardflow state using:
-
-- uploaded files and the current `main` branch first;
-- `ai/context/CURRENT_STATE.md`;
-- `ai/context/PROJECT_CONTEXT.md`;
-- `ai/context/REVIEW_PROTOCOL.md`;
-- `ai/reports/CODEX_REPORT.md`;
-- old chat memory only as unverified context.
-
-Known anomalies:
-
-- Earlier sections of this file still contain historical branch names and
-  experiment context; use this "Current Snapshot" section as the latest state.
-- The all-parallel diagnostics JSON under `.agent/` remains runtime output and
-  is not committed.
-- No new real SDK experiment was run for the ask output/localization work.
-
-Expected output format:
-
-- Review findings first.
-- Then state whether the current ask CLI and localized output behavior are
-  coherent.
-- Then identify any missing tests/docs or operational gaps.
-- Then provide the next Codex-ready prompt.
 
 ## Last Updated
 
@@ -321,36 +344,6 @@ does not prove that all-required is already the code default.
 - Current branch name is `agent/2026-06-11-chatgpt-codex-handoff`, which is stale for this backfill task but still the active branch.
 - Existing handoff files already contain uncommitted diagnostics experiment context.
 - Legacy context was supplied by old ChatGPT Web planning history and should not be treated as verified fact by itself.
-
-## Next Action
-
-Ask ChatGPT to review whether the backfilled context is sufficient for a fresh planning conversation.
-
-Source priority:
-
-- Use uploaded files, the current PR or branch diff, `ai/context/PROJECT_CONTEXT.md`, `ai/context/REVIEW_PROTOCOL.md`, `ai/context/CURRENT_STATE.md`, `ai/decisions/DECISION_LOG.md`, and `ai/reports/CODEX_REPORT.md`.
-- Do not rely on old chat memory if it conflicts with repo files.
-
-Known anomalies:
-
-- Branch name is stale for this backfill task.
-- Product source/test changes belong to the current router/ResearchRequest
-  milestone being committed.
-- The all-parallel stress result is experiment-only unless later confirmed.
-- Legacy context claims are migrated summaries, not automatically verified facts.
-
-Expected output format:
-
-- Review findings first.
-- Then state whether the router/ResearchRequest milestone is coherent and safe
-  to merge after PR review.
-- Then list any missing durable context, tests, or docs.
-- Then provide the next Codex-ready prompt.
-
-Next Codex prompt request:
-
-- Please provide the exact next prompt the user should give Codex to address
-  any PR review findings or proceed toward merge.
 
 ## Current State Update: Job/Daemon Automatic Trigger Architecture
 

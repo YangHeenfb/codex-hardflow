@@ -175,7 +175,6 @@ Verify exact paths before writing implementation against this map.
 - Do not prioritize prompt-width diagnostics now.
 - Do not treat experiment-only data as fully confirmed product policy unless
   user/repo evidence confirms it.
-- Do not make Next ChatGPT Question mandatory ceremony.
 
 ## 7. Current Hypotheses
 
@@ -232,18 +231,15 @@ Similar projects:
 - all_required parallel is preferred over conservative/adaptive defaults.
 - Keyword/rule-based primary classification is disliked.
 - Commit/push permission is task-specific and should not be blind.
-- Next ChatGPT Question should be useful, optional when not needed, and when
-  present should include source priority, anomalies, expected output, and next
-  Codex prompt request.
 
 ## 10. Durable Handoff Rules
 
 - New ChatGPT conversations should not depend on old chat history.
 - They should read repo handoff files first.
 - Codex reports should include summary, commands, verification, files changed,
-  plan path, current state path, output path, safety checklist, and optional
-  next ChatGPT question.
-- Important tasks should update `CURRENT_STATE.md`.
+  plan path, current state path, output path, and safety checklist.
+- Code, documentation, or configuration changes should update
+  `CURRENT_STATE.md` and `CODEX_REPORT.md`.
 - Stale current state should be flagged.
 - Decisions should be labeled confirmed, tentative, obsolete, or
   experiment-only.

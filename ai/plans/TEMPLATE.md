@@ -102,13 +102,10 @@ Codex must update `ai/reports/CODEX_REPORT.md` with:
 - Deviations from plan
 - Issues found
 - Remaining risks
-- Next ChatGPT question, including source priority, known anomalies, expected output format, and a request for the next Codex prompt
 
-## Next ChatGPT Question
+## Status File Updates
 
-Include:
+After every code, documentation, or configuration change, update:
 
-- Source priority: use uploaded files, the current PR, `ai/context/CURRENT_STATE.md`, `ai/reports/CODEX_REPORT.md`, and this plan before old chat memory.
-- Known anomalies: stale state, dirty working tree, skipped checks, missing artifacts, or other caveats.
-- Expected output format: plan, review findings, merge decision, or Codex-ready prompt.
-- Next Codex prompt request: ask ChatGPT for the exact next prompt the user should give Codex.
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`

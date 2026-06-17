@@ -262,7 +262,3 @@ Decision logic result:
 - `recommendation=all_required_parallel_viable`
 
 This is an experiment-only finding. It is not a default policy change.
-
-## Next ChatGPT Question
-
-Please review the all-parallel stress experiment using the plan, current state, Codex report, diagnostics JSON output, and command summary. Did the experiment follow the intended design, and is all_required parallel viable based on the decision criteria?

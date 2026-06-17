@@ -1,5 +1,60 @@
 # Codex Report
 
+## Report Entry: Persist Status File Policy And Remove Next Question Blocks
+
+### Task
+
+Record the durable repository rule that every code, documentation, or
+configuration change must update the state files, and remove the old required
+next-question policy plus stored question blocks from active handoff documents.
+
+### Summary
+
+Updated project handoff guidance so the durable requirement is now focused on
+state maintenance:
+
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+The updated rule says these files are updated after every code, documentation,
+or configuration change, with the change summary, verification status, and
+current risks or open follow-up.
+
+Removed the old required next-question handoff language from repository
+instructions, handoff docs, templates, PR template, review protocol, legacy
+context backfill notes, current state, reports, and the historical all-parallel
+plan.
+
+### Files Changed
+
+- `AGENTS.md`
+- `ai/README.md`
+- `ai/plans/TEMPLATE.md`
+- `ai/decisions/DECISION_LOG.md`
+- `.github/pull_request_template.md`
+- `ai/context/REVIEW_PROTOCOL.md`
+- `ai/context/LEGACY_CONTEXT_BACKFILL.en.md`
+- `ai/context/LEGACY_CONTEXT_BACKFILL.zh.md`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+- `ai/plans/2026-06-11-all-parallel-stress.md`
+
+### Verification
+
+- Text search confirmed the old next-question requirement strings no longer
+  appear in active project handoff files.
+- No npm build/test/verify run yet for this documentation-only change.
+
+### Safety
+
+- No product source code changed.
+- No SDK runner changes.
+- No daemon/job architecture changes.
+- No computed confidence work.
+- No hidden validator work.
+- No large diagnostics run.
+- No global files changed.
+
 ## Report Entry: Ask CLI, Localized Output, Progress Rendering, And Router Exclusions
 
 ### Task
@@ -148,32 +203,6 @@ Run on 2026-06-18 from current `main`:
   fields.
 - `ask` provides a reliable CLI path, but Codex App hook UX is still a separate
   product surface and should not be treated as fixed by CLI improvements alone.
-
-### Next ChatGPT Question
-
-Please review the current codex-hardflow ask CLI and output experience using:
-
-- uploaded files and the current `main` branch first;
-- `ai/context/CURRENT_STATE.md`;
-- `ai/context/PROJECT_CONTEXT.md`;
-- `ai/context/REVIEW_PROTOCOL.md`;
-- `ai/reports/CODEX_REPORT.md`;
-- old chat memory only as unverified context.
-
-Known anomalies:
-
-- Earlier report sections are historical and may mention stale branch names or
-  old test counts.
-- The latest verified state is the report entry dated 2026-06-18.
-- No real SDK experiment was run for the ask output/localization change.
-
-Expected output format:
-
-- Review findings first.
-- Then state whether `codex-hardflow ask` now satisfies the intended standalone
-  strict research UX.
-- Then identify missing tests/docs or operational gaps.
-- Then provide the exact next Codex-ready prompt.
 
 ## Task
 
@@ -342,24 +371,6 @@ This result supports all-required parallelism as worth further testing. It does 
 - The diagnostics command's built-in generic conclusion still says transient noise limits concurrency attribution, but the explicit experiment decision logic passed for all-parallel viability.
 - Existing uncommitted product source/test changes remain in the working tree and are unrelated to this handoff update.
 
-## Next ChatGPT Question
-
-Please review the all-parallel stress experiment using:
-
-- `ai/plans/2026-06-11-all-parallel-stress.md`
-- `ai/context/CURRENT_STATE.md`
-- `ai/reports/CODEX_REPORT.md`
-- `.agent/reports/diagnostics/sdk-all-parallel-stress.json` if available
-- the command output summary
-
-Questions:
-
-1. Did the experiment follow the intended design?
-2. Is all_required parallel viable based on the decision criteria?
-3. Is the result strong enough to justify a larger matrix?
-4. Should the next diagnostic test prompt width, bucket difficulty, or adaptive concurrency?
-5. Is any code change needed, or should this remain an experiment-only finding?
-
 ## Report Entry: Legacy Context Backfill
 
 ### Task
@@ -422,36 +433,6 @@ for future ChatGPT-Codex handoffs.
 - Global files.
 - Raw diagnostics JSON.
 - Private validation artifacts or hidden cases.
-
-### Next ChatGPT Question
-
-Please review the legacy context backfill using:
-
-- uploaded files and the current PR or branch diff first;
-- `ai/context/PROJECT_CONTEXT.md`;
-- `ai/context/REVIEW_PROTOCOL.md`;
-- `ai/context/CURRENT_STATE.md`;
-- `ai/decisions/DECISION_LOG.md`;
-- `ai/reports/CODEX_REPORT.md`;
-- old chat memory only as unverified context.
-
-Known anomalies:
-
-- The branch name is stale for this backfill task.
-- Product source/test dirty changes exist in the working tree and are unrelated.
-- Legacy context claims are migrated summaries, not automatically verified facts.
-- The all-parallel stress result is experiment-only unless later confirmed.
-
-Expected output format:
-
-- Review findings first.
-- Then say whether the backfilled context is sufficient for a fresh ChatGPT planning conversation.
-- Then list missing or risky context.
-- Then provide the next Codex-ready prompt.
-
-Next Codex prompt request:
-
-- Please provide the exact next prompt the user should give Codex.
 
 ## Report Entry: Router-Required Strict Research And ResearchRequests
 
@@ -531,41 +512,6 @@ toward strict programmatic SDK execution.
   trace before allowing with a failure notice; this is documented test coverage,
   but may be stricter in a later change if the user wants hard blocking.
 
-### Next ChatGPT Question
-
-Please review the router-required strict research and ResearchRequest milestone
-using:
-
-- uploaded files, the current PR, and the current branch diff first;
-- `ai/context/CURRENT_STATE.md`;
-- `ai/context/PROJECT_CONTEXT.md`;
-- `ai/context/REVIEW_PROTOCOL.md`;
-- `ai/decisions/DECISION_LOG.md`;
-- `ai/reports/CODEX_REPORT.md`;
-- old chat memory only as unverified context.
-
-Known anomalies:
-
-- Branch name is stale for this implementation milestone.
-- No separate plan file exists for this milestone.
-- Existing diagnostics artifacts under `.agent/reports/diagnostics/` are not
-  committed.
-- The router-required missing-trace Stop gate currently blocks once, then allows
-  with a notice.
-
-Expected output format:
-
-- Review findings first.
-- Then state whether the milestone is coherent and safe to merge after PR
-  review.
-- Then list missing tests, docs, or durable context.
-- Then provide the next Codex-ready prompt.
-
-Next Codex prompt request:
-
-- Please provide the exact next prompt the user should give Codex to address
-  any PR review findings or proceed toward merge.
-
 ## Report Entry: Job/Daemon Automatic Trigger Architecture
 
 ### Task
@@ -637,37 +583,6 @@ research with isolated Codex state.
   behavior. Tests use mock providers for deterministic coverage.
 - Future router providers can add `openai_structured_output` or local model
   routing without changing hook semantics.
-
-### Next ChatGPT Question
-
-Please review the job/daemon automatic trigger architecture using:
-
-- uploaded files, the current `main` diff, and current state files first;
-- `ai/context/CURRENT_STATE.md`;
-- `ai/context/PROJECT_CONTEXT.md`;
-- `ai/context/REVIEW_PROTOCOL.md`;
-- `ai/reports/CODEX_REPORT.md`;
-- old chat memory only as unverified context.
-
-Known anomalies:
-
-- Older entries in current-state/report mention stale branch names from prior
-  handoff work; the current commit target is `main`.
-- Daemon supervision is minimal by design.
-- No global install was run for this change.
-
-Expected output format:
-
-- Review findings first.
-- Then state whether the job/daemon architecture satisfies the intended
-  fail-closed trigger design.
-- Then list missing tests, docs, or operational gaps.
-- Then provide the next Codex-ready prompt.
-
-Next Codex prompt request:
-
-- Please provide the exact next prompt the user should give Codex to address any
-  review findings or proceed with the next implementation step.
 
 ## Report Entry: Queue, Scope, And Progress Snapshot
 
@@ -756,35 +671,3 @@ keyword/rule-based special cases.
 - `estimatedStartAfterMs` is a simple queue estimate, not a runtime prediction.
 - Future work can add richer worker telemetry to job status without changing the
   Stop gate contract.
-
-### Next ChatGPT Question
-
-Please review the queue/scope/progress snapshot fix using:
-
-- uploaded files and the current `main` diff first;
-- `ai/context/CURRENT_STATE.md`;
-- `ai/context/PROJECT_CONTEXT.md`;
-- `ai/context/REVIEW_PROTOCOL.md`;
-- `ai/reports/CODEX_REPORT.md`;
-- old chat memory only as unverified context.
-
-Known anomalies:
-
-- Some support files for Codex-home isolation and test scoping were already
-  dirty before this follow-up, but they are required by the current build/test
-  state and are included in this milestone.
-- No real SDK diagnostics experiment was run in this step.
-- No global install was run for this change.
-
-Expected output format:
-
-- Review findings first.
-- Then state whether the queue/scope/progress model satisfies the intended
-  daemon architecture.
-- Then list missing tests, docs, or operational gaps.
-- Then provide the next Codex-ready prompt.
-
-Next Codex prompt request:
-
-- Please provide the exact next prompt the user should give Codex to address any
-  review findings or proceed with the next implementation step.

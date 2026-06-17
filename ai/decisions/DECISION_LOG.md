@@ -92,17 +92,16 @@
 - Related files: `ai/context/PROJECT_CONTEXT.md`.
 - Follow-up: Revisit after core workflow capabilities are stable.
 
-## Next ChatGPT Question
+## Status File Updates
 
-- Decision: next ChatGPT questions are useful, and when present must include
-  source priority, known anomalies, expected output format, and a request for
-  the next Codex prompt.
+- Decision: Codex updates `ai/context/CURRENT_STATE.md` and
+  `ai/reports/CODEX_REPORT.md` after every code, documentation, or
+  configuration change.
 - Status: confirmed operational rule.
-- Rationale: This prevents old chat memory from overriding repo state.
-- Evidence: User instruction on 2026-06-12.
-- Related files: `AGENTS.md`, `.github/pull_request_template.md`,
-  `ai/plans/TEMPLATE.md`.
-- Follow-up: Existing reports may be updated opportunistically when touched.
+- Rationale: Durable state files keep handoffs accurate across Codex threads,
+  CLI sessions, and context compaction.
+- Evidence: User instruction on 2026-06-18.
+- Related files: `AGENTS.md`, `ai/README.md`, `ai/plans/TEMPLATE.md`.
 
 ## Auto Commit And Push
 

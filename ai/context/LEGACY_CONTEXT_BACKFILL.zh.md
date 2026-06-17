@@ -188,15 +188,14 @@ Hidden validator:
 - 用户希望尽量多 worker 并行。
 - 用户不喜欢 keyword/rule-based primary classification。
 - commit/push 是否允许取决于当前任务，不应盲目。
-- Next ChatGPT Question 有用但不应成为无意义仪式；出现时必须包含 source
-  priority、known anomalies、expected output format 和 next Codex prompt request。
 
 ## 10. Durable Handoff Rules
 
 - 新 ChatGPT 对话应只依赖 repo 文件，不依赖旧 chat。
 - Codex report 应包含 summary、commands run、verification、safety checklist、
-  files changed、plan path、current state path、output path 和可选 next question。
-- 重要任务后更新 `ai/context/CURRENT_STATE.md`。
+  files changed、plan path、current state path 和 output path。
+- 代码、文档或配置修改后更新 `ai/context/CURRENT_STATE.md` 和
+  `ai/reports/CODEX_REPORT.md`。
 - CURRENT_STATE stale 时必须标记。
 - 决策应标为 confirmed、tentative、obsolete 或 experiment-only。
 - AGENTS.md 不应承载长历史，只应指向 durable context。

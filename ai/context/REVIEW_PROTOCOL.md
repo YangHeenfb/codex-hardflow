@@ -61,20 +61,6 @@ ChatGPT review output should include:
 - Findings or risks first, ordered by severity.
 - Decision: ready to merge, needs follow-up, needs clarification, or blocked.
 - Verification gaps and safety concerns.
-- Next Codex prompt, if action is needed.
-
-## Required Next Codex Prompt Shape
-
-The next Codex prompt should include:
-
-- Source priority: use uploaded files, current PR/diff, and repo context files
-  instead of old chat memory.
-- Known anomalies: stale state, dirty working tree, skipped checks, missing
-  artifacts, or contradictory claims.
-- Objective and non-goals.
-- Files in scope and files out of scope.
-- Verification commands and expected reporting.
-- Whether Codex may commit or push.
 
 ## Safety Review Checklist
 

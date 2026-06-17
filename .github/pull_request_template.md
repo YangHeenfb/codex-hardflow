@@ -55,24 +55,3 @@ Result:
 ## Known anomalies
 
 -
-
-## Next ChatGPT question
-
-Ask ChatGPT:
-
-Source priority:
-
-- Use uploaded files, the current PR diff, `ai/context/CURRENT_STATE.md`, `ai/reports/CODEX_REPORT.md`, and the plan path above.
-- Do not rely on old chat memory if it conflicts with repository files or the current PR.
-
-Known anomalies:
-
--
-
-Expected output format:
-
-- Return review findings first, then a merge/follow-up recommendation, then a Codex-ready next prompt.
-
-Next Codex prompt request:
-
-- Please provide the exact next prompt the user should give Codex.
