@@ -71,6 +71,7 @@ export class AskProgressRenderer {
   private lastKey = "";
   private lastAt = 0;
   private lastStatus = "";
+  private carriageLineOpen = false;
 
   constructor(options: AskProgressRendererOptions) {
     this.mode = options.mode ?? "auto";
@@ -97,8 +98,13 @@ export class AskProgressRenderer {
     } else {
       const line = this.mode === "verbose" ? verboseLine(snapshot) : compactLine(snapshot);
       if (line === this.lastRendered && !force) return;
-      if (this.mode === "auto" && this.isTty) this.write(`\r${line}`);
-      else this.write(`${line}\n`);
+      if (this.mode === "auto" && this.isTty) {
+        this.write(`\r${line}`);
+        this.carriageLineOpen = true;
+      } else {
+        this.write(`${line}\n`);
+        this.carriageLineOpen = false;
+      }
       this.lastRendered = line;
     }
     this.lastKey = key;
@@ -107,6 +113,9 @@ export class AskProgressRenderer {
   }
 
   finish(): void {
-    if (this.mode === "auto" && this.isTty && this.lastRendered) this.write("\n");
+    if (this.mode === "auto" && this.isTty && this.carriageLineOpen) {
+      this.write("\n");
+      this.carriageLineOpen = false;
+    }
   }
 }

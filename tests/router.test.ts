@@ -7,6 +7,7 @@ import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
 import { currentRouterTracePath, researchRunRouterTracePath, researchSubagentRouterTracePath } from "../src/paths.js";
 import { runLlmRouter } from "../src/router/llmRouter.js";
 import { normalizeRouterOutput } from "../src/router/routerNormalize.js";
+import { buildRouterPrompt } from "../src/router/routerPrompt.js";
 import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
 import { parseRouterOutput, type RouterOutput, type RouterTrace } from "../src/router/routerSchema.js";
 import { agentSecurityRouterOutput, currentProjectCompetitorRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
@@ -226,6 +227,45 @@ describe("LLM router", () => {
     expect(output.reasons).toEqual(["Original semantic research route."]);
   });
 
+  it("accepts excluded source bucket status in RouterOutput", () => {
+    const output = parseRouterOutput({
+      ...directOutput(),
+      sourceBuckets: [{ bucket: "private_connectors", status: "excluded", reason: "No private/internal context was requested." }]
+    });
+
+    expect(output.sourceBuckets[0]).toEqual({
+      bucket: "private_connectors",
+      status: "excluded",
+      reason: "No private/internal context was requested."
+    });
+  });
+
+  it("normalizes source bucket status synonyms and preserves excluded", () => {
+    const normalized = normalizeRouterOutput(
+      malformedResearchOutput({
+        sourceBuckets: [
+          { bucket: "github", status: "optional", reason: "May have examples." },
+          { bucket: "community", status: "recommended", reason: "Weak but useful signal." },
+          { bucket: "local_repo", status: "not_applicable", reason: "No repo context needed." },
+          { bucket: "private_connectors", status: "private_unavailable", reason: "No private context requested." },
+          { bucket: "academic", status: "surprising", reason: "Bad status from model." }
+        ],
+        reasons: ["Research route."],
+        risks: []
+      })
+    );
+    const output = parseRouterOutput(normalized.normalized);
+
+    expect(output.sourceBuckets.map((bucket) => [bucket.bucket, bucket.status])).toEqual([
+      ["github", "possible"],
+      ["community", "required"],
+      ["local_repo", "not_needed"],
+      ["private_connectors", "excluded"],
+      ["academic", "required"]
+    ]);
+    expect(normalized.warnings).toContain('invalid source bucket status "surprising" for bucket "academic", defaulted to required.');
+  });
+
   it("drops invalid source buckets with warnings", () => {
     const normalized = normalizeRouterOutput(
       malformedResearchOutput({
@@ -241,6 +281,14 @@ describe("LLM router", () => {
     expect(output.diagnostics?.normalizationWarnings).toContain("invalid source bucket: made_up_bucket");
   });
 
+  it("router prompt lists allowed source bucket statuses and result-state boundary", () => {
+    const prompt = buildRouterPrompt({ rawUserPrompt: "research agent memory", currentRunId: "run-prompt-statuses" });
+
+    expect(prompt).toContain("Allowed sourceBuckets.status values: required, possible, not_needed, excluded.");
+    expect(prompt).toContain("Do not output searched_but_no_signal in RouterOutput");
+    expect(prompt).toContain("private_connectors should be excluded");
+  });
+
   it("uses normalized router output instead of router_failed when shape repair is sufficient", async () => {
     const cwd = tempRepo();
     const result = await runLlmRouter(
@@ -251,6 +299,33 @@ describe("LLM router", () => {
     expect(result.output.route).toBe("research");
     expect(result.output.diagnostics?.normalized).toBe(true);
     expect(result.output.sourceBuckets.map((bucket) => bucket.bucket)).toEqual(["local_repo", "competitors"]);
+  });
+
+  it("does not fail router schema when a research prompt includes an excluded bucket", async () => {
+    const cwd = tempRepo();
+    const result = await runLlmRouter(
+      { rawUserPrompt: "agent 记忆管理方面现在有什么前沿方案？", currentRunId: "run-excluded-router" },
+      {
+        cwd,
+        promptRunner: async () =>
+          JSON.stringify(
+            routerOutputForBuckets(["official_docs", "github", "community", "academic", "package_registry", "security"], {
+              sourceBuckets: [
+                ...routerOutputForBuckets(["official_docs", "github", "community", "academic", "package_registry", "security"]).sourceBuckets,
+                { bucket: "private_connectors", status: "excluded", reason: "No private/internal context requested." }
+              ],
+              requiredAgents: [],
+              reasons: ["Research route with intentionally excluded private connectors."],
+              risks: ["may_need_current_info"]
+            })
+          ),
+        writeTrace: false
+      }
+    );
+
+    expect(result.output.route).toBe("research");
+    expect(result.output.sourceBuckets.find((bucket) => bucket.bucket === "private_connectors")?.status).toBe("excluded");
+    expect(result.output.route).not.toBe("router_failed");
   });
 
   it("uses one schema repair retry only after parse and normalization fail", async () => {

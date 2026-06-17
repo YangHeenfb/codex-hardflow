@@ -2,6 +2,7 @@ import {
   EVIDENCE_NEEDS,
   RESEARCH_SCOPES,
   ROUTER_SOURCE_BUCKETS,
+  SOURCE_BUCKET_STATUSES,
   type RouterOutput,
   type RouterSourceBucket
 } from "./routerSchema.js";
@@ -12,11 +13,33 @@ export interface RouterNormalizationResult {
 }
 
 const validSourceBuckets = new Set<string>(ROUTER_SOURCE_BUCKETS);
+const validSourceBucketStatuses = new Set<string>(SOURCE_BUCKET_STATUSES);
 const validResearchScopes = new Set<string>(RESEARCH_SCOPES);
 const validEvidenceNeeds = new Set<string>(EVIDENCE_NEEDS);
+const sourceBucketStatusSynonyms: Record<string, RouterSourceBucket["status"]> = {
+  optional: "possible",
+  maybe: "possible",
+  recommended: "required",
+  must_search: "required",
+  not_applicable: "not_needed",
+  irrelevant: "not_needed",
+  unavailable: "excluded",
+  forbidden: "excluded",
+  private_unavailable: "excluded",
+  skipped_for_safety: "excluded"
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeSourceBucketStatus(status: unknown, bucket: string, warnings: string[]): RouterSourceBucket["status"] {
+  if (typeof status !== "string" || status.length === 0) return "required";
+  if (validSourceBucketStatuses.has(status)) return status as RouterSourceBucket["status"];
+  const normalized = sourceBucketStatusSynonyms[status.toLowerCase()];
+  if (normalized) return normalized;
+  warnings.push(`invalid source bucket status "${status}" for bucket "${bucket}", defaulted to required.`);
+  return "required";
 }
 
 function normalizeSourceBuckets(value: unknown, warnings: string[]): unknown[] {
@@ -47,7 +70,7 @@ function normalizeSourceBuckets(value: unknown, warnings: string[]): unknown[] {
     }
     buckets.push({
       ...item,
-      status: typeof item.status === "string" ? item.status : "required",
+      status: normalizeSourceBucketStatus(item.status, bucket, warnings),
       reason: typeof item.reason === "string" && item.reason.length > 0 ? item.reason : "Normalized from router bucket."
     });
   }

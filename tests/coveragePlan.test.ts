@@ -156,6 +156,31 @@ describe("CoveragePlan and EvidenceLedger", () => {
     expect(fast.coverageMode).toBe("fast");
   });
 
+  it("turns router excluded buckets into CoveragePlan excludedBuckets", () => {
+    const routerOutput = routerOutputForBuckets(["official_docs"], {
+      sourceBuckets: [
+        { bucket: "official_docs", status: "required", reason: "Official docs required." },
+        { bucket: "private_connectors", status: "excluded", reason: "No private/internal context was requested." },
+        { bucket: "local_repo", status: "not_needed", reason: "No current repo context needed." }
+      ] as RouterOutput["sourceBuckets"],
+      requiredAgents: []
+    });
+
+    const plan = buildCoveragePlan(routerOutput, "research current agent memory approaches", {
+      runId: "run-router-excluded-buckets"
+    });
+
+    expect(plan.excludedBuckets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ bucket: "private_connectors", reason: "No private/internal context was requested." }),
+        expect.objectContaining({ bucket: "local_repo", reason: "No current repo context needed." })
+      ])
+    );
+    expect(plan.requiredBuckets).not.toContain("private_connectors");
+    expect(plan.requiredBuckets).not.toContain("local_repo");
+    expect(plan.requiredBucketCount).toBe(plan.requiredBuckets.length);
+  });
+
   it("requires exhaustive AI coding agent hidden-validation buckets with engines", () => {
     const plan = buildCoveragePlan(agentSecurityRouterOutput, "research AI coding agent hidden validation sandbox evaluation approaches", {
       runId: "run-hidden-validation-exhaustive"

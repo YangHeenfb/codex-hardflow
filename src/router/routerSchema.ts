@@ -28,7 +28,7 @@ export const RESEARCH_PROFILES = ["none", "light", "broad", "current_state", "co
 export const VALIDATION_PROFILES = ["none", "manifest_only", "public_checks", "hidden_validation", "hidden_validation_with_final_holdout"] as const;
 export const RESEARCH_SCOPES = ["none", "local_diagnostic", "local_plus_external", "external_exhaustive", "implementation_support"] as const;
 export const EVIDENCE_NEEDS = ["none", "local_only", "external_sources_optional", "external_sources_required"] as const;
-export const SOURCE_BUCKET_STATUSES = ["required", "possible", "not_needed"] as const;
+export const SOURCE_BUCKET_STATUSES = ["required", "possible", "not_needed", "excluded"] as const;
 export const ROUTER_RISKS = [
   "ambiguous_task",
   "may_need_current_info",

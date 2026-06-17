@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { runAsk } from "../src/ask/askRunner.js";
 import { AskProgressRenderer } from "../src/ask/progressRenderer.js";
 import { resolveOutputLanguagePolicy } from "../src/i18n/languagePolicy.js";
+import { createHardflowJob, failHardflowJob } from "../src/jobs/jobStore.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-ask-output-"));
@@ -109,6 +110,28 @@ describe("ask output language policy", () => {
     expect((cli.stdout.match(/主要来源:/g) ?? []).length).toBe(1);
     expect((cli.stdout.match(/注意事项:/g) ?? []).length).toBeLessThanOrEqual(1);
   });
+
+  it("Chinese prompt wraps router failures in localized user-facing text", async () => {
+    const cwd = tempRepo();
+    createHardflowJob({
+      runId: "run-ask-router-failed-zh",
+      cwd,
+      rawUserPrompt: "agent 记忆管理方面现在有什么前沿方案？",
+      promptHash: "hash",
+      turnId: "turn-router-failed-zh",
+      triggerSource: "cli"
+    });
+    failHardflowJob(cwd, "run-ask-router-failed-zh", "Router output failed schema after normalization and repair retry: sourceBuckets[6].status invalid", {
+      route: "router_failed"
+    });
+
+    const result = await runAsk({ cwd, fromRunId: "run-ask-router-failed-zh", progressMode: "quiet" });
+
+    expect(result.status).toBe("failed");
+    expect(result.answer).toContain("路由失败:");
+    expect(result.answer).toContain("详情:");
+    expect(result.failureReason).toContain("Router output failed schema");
+  });
 });
 
 describe("ask progress renderer", () => {
@@ -118,6 +141,15 @@ describe("ask progress renderer", () => {
     renderer.render({ runId: "run-a", status: "researching", completedBucketCount: 1, runningBucketCount: 2, failedBucketCount: 0 }, true);
 
     expect(writes[0].startsWith("\rHardFlow researching")).toBe(true);
+  });
+
+  it("finish adds a newline after a TTY carriage-return status line", () => {
+    const writes: string[] = [];
+    const renderer = new AskProgressRenderer({ mode: "auto", isTty: true, write: (message) => writes.push(message), now: () => 0 });
+    renderer.render({ runId: "run-a", status: "pending" }, true);
+    renderer.finish();
+
+    expect(writes).toEqual([expect.stringMatching(/^\rHardFlow pending/), "\n"]);
   });
 
   it("auto non-TTY suppresses duplicate progress lines", () => {

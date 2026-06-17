@@ -120,6 +120,22 @@ function coverageForRun(cwd: string, runId: string): CoverageEvalResult | null {
   }
 }
 
+function localizedJobFailureAnswer(
+  status: HardflowJob["status"] | "missing",
+  route: HardflowJob["route"],
+  runId: string,
+  reason: string,
+  policy: OutputLanguagePolicy
+): string {
+  const labels = labelsForLanguage(policy.outputLanguage);
+  if (status === "missing") return `${labels.jobNotFound}: ${runId}`;
+  if (route === "router_failed" || /^router\b/i.test(reason) || /router output failed/i.test(reason)) {
+    return `${labels.routingFailed}: HardFlow could not produce a valid router_trace for runId=${runId}.\n${labels.details}: ${reason}`;
+  }
+  if (status === "failed" || status === "cancelled") return `${labels.failed}: ${reason}`;
+  return `${labels.jobNotComplete}: runId=${runId}, status=${status}.\n${labels.details}: ${reason}`;
+}
+
 async function defaultDirectAnswer(prompt: string, cwd: string, runId: string): Promise<string> {
   const codexHome = prepareIsolatedCodexHome(hardflowRunCodexHome(cwd, runId));
   const previous = process.env.CODEX_HOME;
@@ -151,17 +167,18 @@ export function askResultFromRun(
   const job = readHardflowJob(cwd, runId);
   const fallbackPolicy = resolveOutputLanguagePolicy(questionOverride ?? job?.rawUserPrompt ?? "");
   if (!job) {
+    const reason = `HardFlow job not found: ${runId}`;
     return {
       runId,
       status: "failed",
       route: null,
       async: false,
-      answer: `HardFlow job not found: ${runId}`,
+      answer: localizedJobFailureAnswer("missing", null, runId, reason, fallbackPolicy),
       coverageSummary: null,
       sourceSummary: [],
       caveats: [],
       outputLanguagePolicy: fallbackPolicy,
-      failureReason: `HardFlow job not found: ${runId}`,
+      failureReason: reason,
       researchReportPath: null,
       evidenceLedgerPath: null,
       noOrdinaryWebFallback: true
@@ -177,7 +194,7 @@ export function askResultFromRun(
       status: job.status,
       route: job.route,
       async: false,
-      answer: reason,
+      answer: localizedJobFailureAnswer(job.status, job.route, runId, reason, fallbackPolicy),
       coverageSummary: null,
       sourceSummary: [],
       caveats: [],

@@ -103,7 +103,7 @@ function routerReason(routerOutput: RouterOutput, bucket: string): string | unde
   return routerOutput.sourceBuckets.find((item) => item.bucket === bucket)?.reason;
 }
 
-function routerBucketStatus(routerOutput: RouterOutput, bucket: string): "required" | "possible" | "not_needed" | undefined {
+function routerBucketStatus(routerOutput: RouterOutput, bucket: string): "required" | "possible" | "not_needed" | "excluded" | undefined {
   return routerOutput.sourceBuckets.find((item) => item.bucket === bucket)?.status;
 }
 
@@ -114,6 +114,10 @@ function routerHasApplicableBucket(routerOutput: RouterOutput, bucket: string): 
 
 function applyRouterBuckets(routerOutput: RouterOutput, mode: CoverageMode | undefined, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>, excluded: Map<string, ExcludedBucket>): void {
   for (const item of routerOutput.sourceBuckets) {
+    if (item.status === "excluded") {
+      excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as intentionally excluded.");
+      continue;
+    }
     if (item.status === "not_needed") {
       excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as logically not needed.");
       continue;
@@ -181,6 +185,10 @@ function requireLocalPlusBase(routerOutput: RouterOutput, classification: TaskCl
 
 function requireRouterApplicableBuckets(routerOutput: RouterOutput, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>, excluded: Map<string, ExcludedBucket>): void {
   for (const item of routerOutput.sourceBuckets) {
+    if (item.status === "excluded") {
+      excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as intentionally excluded.");
+      continue;
+    }
     if (item.status === "not_needed") {
       excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as logically not needed.");
       continue;
@@ -192,6 +200,7 @@ function requireRouterApplicableBuckets(routerOutput: RouterOutput, classificati
 function applyExhaustiveDefaults(task: string, routerOutput: RouterOutput, classification: TaskClassification, buckets: Map<string, CoverageBucketDecision>, excluded: Map<string, ExcludedBucket>): void {
   const scope = routerOutput.researchScope;
   for (const item of routerOutput.sourceBuckets) {
+    if (item.status === "excluded") excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as intentionally excluded.");
     if (item.status === "not_needed") excludeBucket(excluded, item.bucket, item.reason || "Router marked this bucket as logically not needed.");
   }
 

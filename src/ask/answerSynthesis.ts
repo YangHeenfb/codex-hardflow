@@ -39,6 +39,10 @@ interface Labels {
   runInfo: string;
   evidence: string;
   failed: string;
+  routingFailed: string;
+  details: string;
+  jobNotFound: string;
+  jobNotComplete: string;
   degraded: string;
   sourceGaps: string;
   noEvidence: string;
@@ -63,6 +67,10 @@ const EN: Labels = {
   runInfo: "Run info",
   evidence: "Evidence",
   failed: "Failed",
+  routingFailed: "Routing failed",
+  details: "Details",
+  jobNotFound: "HardFlow job not found",
+  jobNotComplete: "HardFlow job is not complete",
   degraded: "Degraded",
   sourceGaps: "Source gaps",
   noEvidence: "No source-bearing EvidenceLedger items were available; answer is limited to no-signal and coverage metadata.",
@@ -89,6 +97,10 @@ const LABELS: Record<string, Labels> = {
     runInfo: "运行信息",
     evidence: "证据",
     failed: "失败",
+    routingFailed: "路由失败",
+    details: "详情",
+    jobNotFound: "未找到 HardFlow job",
+    jobNotComplete: "HardFlow job 尚未完成",
     degraded: "降级",
     sourceGaps: "来源缺口",
     noEvidence: "EvidenceLedger 中没有带来源的证据项；回答仅限于无信号记录和覆盖元数据。",
@@ -112,6 +124,10 @@ const LABELS: Record<string, Labels> = {
     runInfo: "実行情報",
     evidence: "証拠",
     failed: "失敗",
+    routingFailed: "ルーティング失敗",
+    details: "詳細",
+    jobNotFound: "HardFlow job が見つかりません",
+    jobNotComplete: "HardFlow job はまだ完了していません",
     degraded: "低下",
     sourceGaps: "ソースギャップ",
     noEvidence: "EvidenceLedger にソース付き証拠がないため、回答は no-signal とカバレッジ情報に限定されます。",
@@ -135,6 +151,10 @@ const LABELS: Record<string, Labels> = {
     runInfo: "Información de ejecución",
     evidence: "Evidencia",
     failed: "Falló",
+    routingFailed: "Falló el enrutamiento",
+    details: "Detalles",
+    jobNotFound: "No se encontró el job de HardFlow",
+    jobNotComplete: "El job de HardFlow no está completo",
     degraded: "Degradado",
     sourceGaps: "Brechas de fuentes",
     noEvidence: "No hay elementos con fuente en EvidenceLedger; la respuesta se limita a señales ausentes y metadatos de cobertura.",
