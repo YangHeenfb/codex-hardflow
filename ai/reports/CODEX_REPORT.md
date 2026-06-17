@@ -1,5 +1,180 @@
 # Codex Report
 
+## Report Entry: Ask CLI, Localized Output, Progress Rendering, And Router Exclusions
+
+### Task
+
+Backfill the durable handoff report for the recent codex-hardflow work that:
+
+- added the synchronous `codex-hardflow ask` CLI;
+- improved ask final-answer language preservation and progress rendering;
+- fixed router excluded-bucket handling now present at current `main` HEAD.
+
+### Current Branch And HEAD
+
+- Branch: `main`
+- Current HEAD: `5239ede Fix router excluded bucket handling`
+- Local `main` was aligned with `origin/main` before this status/report update.
+
+### Recent Commits Covered
+
+- `275bb57 Implement synchronous hardflow ask CLI`
+- `5d59a5c Refactor ask progress and answer synthesis`
+- `5239ede Fix router excluded bucket handling`
+
+### Summary
+
+`codex-hardflow ask` is now the intended standalone synchronous path for users
+who want HardFlow research without relying on Codex App foreground hook behavior.
+
+The CLI now:
+
+- routes the question;
+- answers directly for `direct_answer` routes;
+- runs strict programmatic exhaustive/all-required research for research routes;
+- waits for completion;
+- synthesizes only from run-owned `research_report.json` / `EvidenceLedger`;
+- supports async queueing and later `--from-run` retrieval;
+- exposes machine-readable JSON output.
+
+The ask output path now also:
+
+- detects explicit output-language requests such as `中文回答`, `answer in
+  English`, `responde en español`, `日本語で答えて`, and similar common patterns;
+- defaults to the dominant user prompt language when no explicit language is
+  requested;
+- localizes final-answer headings, coverage summary, caveats, and run
+  information;
+- keeps source titles, URLs, evidence IDs, package/API names, product names, and
+  paper titles unchanged;
+- suppresses duplicate progress lines;
+- supports `--progress auto|quiet|verbose|json`;
+- caps sources in the answer by default and supports `--show-all-sources` /
+  `--show-evidence-ids`.
+
+The latest HEAD also includes router excluded-bucket handling fixes and tests.
+
+More specifically, commit `5239ede` fixed the router/schema mismatch observed
+when `codex-hardflow ask "agent 记忆管理方面现在有什么前沿方案？"` received a
+router bucket status of `excluded`:
+
+- `RouterOutput.sourceBuckets[*].status` now accepts `excluded` in addition to
+  `required`, `possible`, and `not_needed`.
+- `routerNormalize` preserves `excluded` and normalizes common model synonyms:
+  `optional` / `maybe` -> `possible`, `recommended` / `must_search` ->
+  `required`, `not_applicable` / `irrelevant` -> `not_needed`, and
+  `unavailable` / `forbidden` / `private_unavailable` /
+  `skipped_for_safety` -> `excluded`.
+- Invalid bucket statuses now default to `required` with a normalization warning
+  instead of silently dropping the bucket.
+- Router prompt and repair prompt now explicitly list allowed
+  `sourceBuckets.status` values and state that `searched_but_no_signal` belongs
+  to completed research bucket results, not RouterOutput.
+- CoveragePolicy maps router `excluded` buckets into
+  `CoveragePlan.excludedBuckets` and excludes them from `requiredBucketCount`.
+- Ask router-failure output is localized for Chinese prompts with
+  `路由失败:` and `详情:` while preserving the raw technical error in
+  `failureReason` / JSON output.
+- Ask progress rendering now finishes open TTY carriage-return status lines with
+  a newline so shell prompts or follow-up commands do not glue to the last
+  progress line after a router failure.
+
+### Files Changed In Covered Commits
+
+Ask CLI and output:
+
+- `src/ask/askRunner.ts`
+- `src/ask/answerSynthesis.ts`
+- `src/ask/progressRenderer.ts`
+- `src/i18n/languagePolicy.ts`
+- `src/cli.ts`
+- `src/flagParser.ts`
+- `src/daemon/jobRunner.ts`
+- `src/jobs/jobSchema.ts`
+- `src/jobs/jobStore.ts`
+- `tests/askCli.test.ts`
+- `tests/askOutput.test.ts`
+
+Router/coverage excluded-bucket handling:
+
+- `src/coverage/coveragePolicy.ts`
+- `src/router/llmRouter.ts`
+- `src/router/routerNormalize.ts`
+- `src/router/routerPrompt.ts`
+- `src/router/routerSchema.ts`
+- `tests/coveragePlan.test.ts`
+- `tests/router.test.ts`
+
+Handoff/status update:
+
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Verification Commands And Result
+
+Run on 2026-06-18 from current `main`:
+
+- `npm run build`: passed.
+- `npm test`: passed, 30 test files and 260 tests.
+- `npm run verify`: passed.
+  - `packDryRunPassed=true`
+  - `forbidden=[]`
+  - `globalWrapperFresh=true`
+  - wrapper target:
+    `/Users/yang/Documents/subagents/bin/codex-hardflow`
+- `npm pack --dry-run --json`: passed, package entry count `210`.
+
+### Safety Checklist
+
+- [x] Did not modify global files.
+- [x] Did not run `install-global`.
+- [x] Did not require hook re-trust for CLI-output-only changes.
+- [x] Did not change the SDK runner for the ask output/localization work.
+- [x] Did not change daemon/job architecture in the ask output/localization step.
+- [x] Did not do computed confidence.
+- [x] Did not do hidden validator runner work.
+- [x] Did not run large diagnostics experiments.
+- [x] Did not add raw diagnostics JSON or runtime `.agent` artifacts to git.
+
+### Risks And Follow-Ups
+
+- The deterministic ask synthesis localizes headings/explanations but does not
+  translate raw EvidenceLedger claims. This is intentional for evidence
+  fidelity; future work could add a constrained translation layer if needed.
+- Language detection is heuristic and covers common scripts/languages; obscure
+  mixed-language prompts may still need explicit language requests.
+- Progress rendering uses available job/worker summary fields. Richer retry or
+  slow-worker progress can be added later if worker list summaries expose more
+  fields.
+- `ask` provides a reliable CLI path, but Codex App hook UX is still a separate
+  product surface and should not be treated as fixed by CLI improvements alone.
+
+### Next ChatGPT Question
+
+Please review the current codex-hardflow ask CLI and output experience using:
+
+- uploaded files and the current `main` branch first;
+- `ai/context/CURRENT_STATE.md`;
+- `ai/context/PROJECT_CONTEXT.md`;
+- `ai/context/REVIEW_PROTOCOL.md`;
+- `ai/reports/CODEX_REPORT.md`;
+- old chat memory only as unverified context.
+
+Known anomalies:
+
+- Earlier report sections are historical and may mention stale branch names or
+  old test counts.
+- The latest verified state is the report entry dated 2026-06-18.
+- No real SDK experiment was run for the ask output/localization change.
+
+Expected output format:
+
+- Review findings first.
+- Then state whether `codex-hardflow ask` now satisfies the intended standalone
+  strict research UX.
+- Then identify missing tests/docs or operational gaps.
+- Then provide the exact next Codex-ready prompt.
+
 ## Task
 
 Run a real isolated codex-hardflow diagnostics experiment: all-parallel stress test for required external research buckets.

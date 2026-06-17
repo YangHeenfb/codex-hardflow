@@ -1,5 +1,123 @@
 # Current State
 
+## Current Snapshot
+
+Last updated: 2026-06-18
+
+Branch:
+
+- `main`
+- Current HEAD: `5239ede Fix router excluded bucket handling`
+- Remote state: local `main` is aligned with `origin/main` before this status-file update.
+
+Current objective:
+
+- Bring the durable handoff state files back in sync with the recent
+  codex-hardflow work around `ask`, output localization/progress rendering, and
+  router excluded-bucket handling.
+
+Recent implementation milestones now on `main`:
+
+- `275bb57 Implement synchronous hardflow ask CLI`
+  - Added `codex-hardflow ask` as a synchronous CLI path independent of Codex
+    App hook/Stop-gate foreground behavior.
+  - `ask` routes the question, runs strict programmatic research for research
+    routes, waits for completion, and synthesizes from run-owned
+    `research_report.json` / `EvidenceLedger`.
+  - Added `--json`, `--async`, `--from-run`, provider options, coverage/parallel
+    options, source limits, and `jobs wait`.
+- `5d59a5c Refactor ask progress and answer synthesis`
+  - Added output language policy and localized ask answer synthesis.
+  - Chinese/Japanese/Spanish and other common-language prompts now keep the
+    final answer headings/explanations in the user-requested or dominant user
+    language.
+  - Added ask progress renderer with `auto`, `quiet`, `verbose`, and `json`
+    modes, duplicate suppression, TTY single-line updates, and source-list
+    output controls.
+- `5239ede Fix router excluded bucket handling`
+  - Tightened router/coverage behavior for excluded buckets.
+  - Added tests around ask output and router/coverage excluded-bucket handling.
+  - `RouterOutput.sourceBuckets[*].status` now accepts `excluded` in addition
+    to `required`, `possible`, and `not_needed`.
+  - `routerNormalize` preserves `excluded` and normalizes common status
+    synonyms such as `optional` / `maybe` -> `possible`,
+    `recommended` / `must_search` -> `required`, `not_applicable` /
+    `irrelevant` -> `not_needed`, and `unavailable` / `forbidden` /
+    `private_unavailable` / `skipped_for_safety` -> `excluded`.
+  - Invalid router bucket statuses now fail safe to `required` with a
+    normalization warning instead of dropping the bucket.
+  - Router prompt and repair prompt now explicitly list allowed
+    `sourceBuckets.status` values and state that `searched_but_no_signal` is a
+    research result state, not a RouterOutput status.
+  - CoveragePolicy now maps router `excluded` buckets into
+    `CoveragePlan.excludedBuckets` and keeps them out of `requiredBucketCount`.
+  - `ask` router-failure output is localized for Chinese prompts with
+    `路由失败:` and `详情:` while preserving the raw technical failure in
+    `failureReason`.
+  - The ask progress renderer now finishes open TTY carriage-return status
+    lines with a newline so shell prompts or follow-up commands do not glue to
+    the last progress line after failures.
+
+Current verification result:
+
+- `npm run build`: passed on 2026-06-18.
+- `npm test`: passed on 2026-06-18, 30 test files and 260 tests.
+- `npm run verify`: passed on 2026-06-18; `verify:self` reported
+  `packDryRunPassed=true`, `forbidden=[]`, global wrapper fresh, and wrapper
+  target pointing at `/Users/yang/Documents/subagents/bin/codex-hardflow`.
+- `npm pack --dry-run --json`: passed on 2026-06-18, package entry count `210`.
+
+Safety / scope notes:
+
+- No SDK runner changes were made for the ask output/localization work.
+- No daemon/job architecture change was made in the output-localization step.
+- No computed confidence work was done.
+- No hidden validator runner work was done.
+- No large diagnostics experiment was run.
+- No global files were modified and no `install-global` was run.
+- Because the global wrapper already points at this repo, normal local use only
+  needs the built `dist/` output; hook trust does not need to be refreshed for
+  CLI-output-only changes.
+
+Current working tree after this update:
+
+- Expected dirty files: this `ai/context/CURRENT_STATE.md` and
+  `ai/reports/CODEX_REPORT.md` status backfill only.
+- Do not stage unrelated changes if another process modifies the repo.
+
+Next action:
+
+- If the user asks, commit and push only these handoff/status-file updates.
+- Otherwise, continue implementation from current `main`; the old all-parallel
+  plan remains historical context, not the active task plan.
+
+Next ChatGPT question:
+
+Please review the current codex-hardflow state using:
+
+- uploaded files and the current `main` branch first;
+- `ai/context/CURRENT_STATE.md`;
+- `ai/context/PROJECT_CONTEXT.md`;
+- `ai/context/REVIEW_PROTOCOL.md`;
+- `ai/reports/CODEX_REPORT.md`;
+- old chat memory only as unverified context.
+
+Known anomalies:
+
+- Earlier sections of this file still contain historical branch names and
+  experiment context; use this "Current Snapshot" section as the latest state.
+- The all-parallel diagnostics JSON under `.agent/` remains runtime output and
+  is not committed.
+- No new real SDK experiment was run for the ask output/localization work.
+
+Expected output format:
+
+- Review findings first.
+- Then state whether the current ask CLI and localized output behavior are
+  coherent.
+- Then identify any missing tests/docs or operational gaps.
+- Then provide the next Codex-ready prompt.
+
 ## Last Updated
 
 2026-06-13
