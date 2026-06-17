@@ -23,7 +23,9 @@ const BOOLEAN_FLAGS = new Set([
   "show-progress",
   "no-progress",
   "show-all-sources",
-  "show-evidence-ids"
+  "show-evidence-ids",
+  "fancy-progress",
+  "raw-evidence-summary"
 ]);
 
 const STRING_FLAGS = new Set([
@@ -105,7 +107,8 @@ const STRING_FLAGS = new Set([
   "worker-provider",
   "progress",
   "progress-interval-ms",
-  "max-sources-in-answer"
+  "max-sources-in-answer",
+  "answer-synthesis-provider"
 ]);
 
 function parseBooleanFlagValue(key: string, value: string): boolean {

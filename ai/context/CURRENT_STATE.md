@@ -1,5 +1,67 @@
 # Current State
 
+## Current Snapshot: Ask Synthesis And Progress Output Fix
+
+Last updated: 2026-06-18
+
+Branch:
+
+- `main`
+- Base HEAD before this change: `5239ede Fix router excluded bucket handling`
+
+Current objective:
+
+- Fix `codex-hardflow ask` final synthesis so non-English prompts are not
+  answered by directly pasting English worker evidence claims.
+- Fix default ask progress rendering so progress goes to stderr, uses one-line
+  TTY updates, suppresses duplicate lines, and does not pollute JSON stdout.
+
+Implementation summary:
+
+- Added answer synthesis provider support for `codex_cli`, `codex_sdk`, and
+  `mock`.
+- Real ask research runs default to isolated `codex_cli` answer synthesis after
+  strict research completes; mock tests/runs use the mock synthesis provider.
+- Final answer formatting now uses language-aware localized headings and an
+  answer body synthesized from EvidenceLedger rather than raw claim bullets.
+- Source titles, URLs, evidence IDs, package/API names, product names, and paper
+  titles remain unchanged.
+- Added `OutputLanguagePolicy.confidence` and expanded tests for Chinese,
+  Japanese, Korean, Spanish, and explicit language override behavior.
+- Added `--answer-synthesis-provider`, `--raw-evidence-summary`,
+  `--progress minimal`, and `--fancy-progress`.
+- Default `--json` ask output now suppresses progress unless progress is
+  explicitly requested.
+- Progress renderer now clears and rewrites the current TTY line, writes
+  progress to stderr through the CLI, appends a clean newline on finish, and
+  avoids repeated identical status lines.
+
+Smoke:
+
+- Ran mock smoke:
+  `codex-hardflow ask "agent 记忆管理方面现在有什么前沿方案？" --router-provider mock --worker-provider mock --answer-synthesis-provider mock --progress quiet`
+- Result: Chinese headings/body, no raw `Mock evidence for ...` claim bullets,
+  source titles/URLs preserved, no duplicate source/caveat sections.
+
+Verification:
+
+- `npm run build`: passed.
+- `npm test`: passed, 30 test files and 262 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed, package entry count `213`.
+
+Safety / scope notes:
+
+- Did not modify SDK runner behavior.
+- Did not modify daemon/job architecture.
+- Did not modify coverage policy.
+- Did not do computed confidence.
+- Did not do hidden validator work.
+- Did not run a large experiment or real SDK research smoke.
+- Did not modify global files or run `install-global`.
+- Build updated `dist/`; the global wrapper already points at this repo, so no
+  hook re-trust is required for these CLI output changes.
+
 ## Current Snapshot: Status File Policy Update
 
 Last updated: 2026-06-18

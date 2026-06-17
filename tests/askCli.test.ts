@@ -69,7 +69,8 @@ describe("codex-hardflow ask CLI", () => {
     expect(result.coverageSummary?.requiredBucketCount).toBeGreaterThan(0);
     expect(result.coverageSummary?.evidenceItemCount).toBeGreaterThan(0);
     expect(result.sourceSummary.length).toBeGreaterThan(0);
-    expect(result.answer).toContain("Mock evidence");
+    expect(result.answer).toContain("The research covered");
+    expect(result.answer).not.toContain("Mock evidence for official_docs.");
     expect(ledger.items.length).toBeGreaterThan(0);
     expect(report.runner_mode).toBe("strict_programmatic");
     expect(report.programmaticMultiAgent).toBe(true);
@@ -91,6 +92,7 @@ describe("codex-hardflow ask CLI", () => {
     expect(fromRun.status).toBe("completed");
     expect(fromRun.route).toBe("research");
     expect(fromRun.answer).toContain("Answer from HardFlow evidence");
+    expect(fromRun.answer).not.toContain("Mock evidence for official_docs.");
   });
 
   it("ask --async creates a job only", async () => {
@@ -121,6 +123,16 @@ describe("codex-hardflow ask CLI", () => {
     expect(parsed.status).toBe("pending");
     expect(parsed.async).toBe(true);
     expect(parsed.noOrdinaryWebFallback).toBe(true);
+  });
+
+  it("ask --json does not print progress by default", () => {
+    const cwd = tempRepo();
+    const cli = runCli(cwd, ["ask", "--json", "--router-provider", "mock", "--worker-provider", "mock", "What are current practical solutions?"]);
+    const parsed = JSON.parse(cli.stdout) as { status: string; answer: string };
+
+    expect(cli.status).toBe(0);
+    expect(parsed.status).toBe("completed");
+    expect(cli.stderr).not.toContain("HardFlow researching");
   });
 
   it("ask failed exits nonzero", () => {

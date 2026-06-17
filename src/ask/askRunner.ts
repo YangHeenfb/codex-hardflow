@@ -13,7 +13,8 @@ import type { RouterOutput } from "../router/routerSchema.js";
 import type { CoverageMode, ParallelPolicy, ResearchReport } from "../schemas.js";
 import { listSdkWorkerStates, type SdkResearchStepRunner } from "../research/sdkResearchRunner.js";
 import { languageInstruction, resolveOutputLanguagePolicy, type OutputLanguagePolicy } from "../i18n/languagePolicy.js";
-import { labelsForLanguage, synthesizeResearchAnswer, type AskCoverageSummary, type AskSourceSummary } from "./answerSynthesis.js";
+import { buildCoverageSummary, labelsForLanguage, synthesizeResearchAnswer, type AskCoverageSummary, type AskSourceSummary } from "./answerSynthesis.js";
+import { synthesizeAnswerBodyWithProvider, type AnswerSynthesisProvider } from "./answerSynthesisProvider.js";
 import { AskProgressRenderer, type AskProgressMode, type AskProgressSnapshot } from "./progressRenderer.js";
 
 export interface AskResult {
@@ -46,11 +47,14 @@ export interface RunAskOptions {
   maxSourcesPerWorker?: number;
   progressMode?: AskProgressMode;
   progressIntervalMs?: number;
+  fancyProgress?: boolean;
   isProgressTty?: boolean;
   progressWriter?: (message: string) => void;
+  answerSynthesisProvider?: AnswerSynthesisProvider;
   maxSourcesInAnswer?: number;
   showAllSources?: boolean;
   showEvidenceIds?: boolean;
+  rawEvidenceSummary?: boolean;
   mockRouterOutput?: RouterOutput;
   sdkStepRunner?: SdkResearchStepRunner;
   sdkAvailable?: boolean;
@@ -120,6 +124,15 @@ function coverageForRun(cwd: string, runId: string): CoverageEvalResult | null {
   }
 }
 
+function defaultAnswerSynthesisProvider(cwd: string, runId: string, options: RunAskOptions): AnswerSynthesisProvider {
+  if (options.answerSynthesisProvider) return options.answerSynthesisProvider;
+  const job = readHardflowJob(cwd, runId);
+  if (options.workerProvider === "mock" || options.routerProvider === "mock" || job?.workerProvider === "mock" || job?.routerProvider === "mock") {
+    return "mock";
+  }
+  return "codex_cli";
+}
+
 function localizedJobFailureAnswer(
   status: HardflowJob["status"] | "missing",
   route: HardflowJob["route"],
@@ -162,7 +175,7 @@ export function askResultFromRun(
   cwd: string,
   runId: string,
   questionOverride?: string,
-  synthesisOptions: { maxSourcesInAnswer?: number; showAllSources?: boolean; showEvidenceIds?: boolean } = {}
+  synthesisOptions: { maxSourcesInAnswer?: number; showAllSources?: boolean; showEvidenceIds?: boolean; rawEvidenceSummary?: boolean } = {}
 ): AskResult {
   const job = readHardflowJob(cwd, runId);
   const fallbackPolicy = resolveOutputLanguagePolicy(questionOverride ?? job?.rawUserPrompt ?? "");
@@ -242,7 +255,64 @@ export function askResultFromRun(
   }
   const ledger = loadEvidenceLedger(cwd, runId);
   const coverage = coverageForRun(cwd, runId);
-  const synthesized = synthesizeResearchAnswer(questionOverride ?? report.rawUserPrompt, report, ledger.items, coverage, synthesisOptions);
+  const synthesized = synthesizeResearchAnswer(questionOverride ?? report.rawUserPrompt, report, ledger.items, coverage, {
+    ...synthesisOptions,
+    fullReportPath: researchRunReportPath(cwd, runId)
+  });
+  return {
+    runId,
+    status: job.status,
+    route: job.route,
+    async: false,
+    answer: synthesized.answer,
+    coverageSummary: synthesized.coverageSummary,
+    sourceSummary: synthesized.sourceSummary,
+    caveats: synthesized.caveats,
+    outputLanguagePolicy: synthesized.outputLanguagePolicy,
+    failureReason: null,
+    researchReportPath: researchRunReportPath(cwd, runId),
+    evidenceLedgerPath: researchRunEvidenceLedgerPath(cwd, runId),
+    noOrdinaryWebFallback: true
+  };
+}
+
+async function askResultFromRunWithSynthesis(
+  cwd: string,
+  runId: string,
+  questionOverride: string | undefined,
+  synthesisOptions: { maxSourcesInAnswer?: number; showAllSources?: boolean; showEvidenceIds?: boolean; rawEvidenceSummary?: boolean },
+  provider: AnswerSynthesisProvider,
+  timeoutMs?: number
+): Promise<AskResult> {
+  const job = readHardflowJob(cwd, runId);
+  if (!job || job.status !== "completed" || job.route !== "research") {
+    return askResultFromRun(cwd, runId, questionOverride, synthesisOptions);
+  }
+  const report = readResearchReportIfPresent(cwd, runId);
+  if (!report) return askResultFromRun(cwd, runId, questionOverride, synthesisOptions);
+  const ledger = loadEvidenceLedger(cwd, runId);
+  const coverage = coverageForRun(cwd, runId);
+  const question = questionOverride ?? report.rawUserPrompt;
+  const policy = resolveOutputLanguagePolicy(question);
+  const coverageSummary = buildCoverageSummary(report, ledger.items, coverage);
+  const providerResult = await synthesizeAnswerBodyWithProvider({
+    cwd,
+    runId,
+    rawUserPrompt: question,
+    report,
+    items: ledger.items,
+    coverage,
+    coverageSummary,
+    languagePolicy: policy,
+    provider,
+    timeoutMs
+  });
+  const synthesized = synthesizeResearchAnswer(question, report, ledger.items, coverage, {
+    ...synthesisOptions,
+    answerBody: providerResult.answerBody,
+    synthesisWarning: providerResult.warning,
+    fullReportPath: researchRunReportPath(cwd, runId)
+  });
   return {
     runId,
     status: job.status,
@@ -303,11 +373,13 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
   const synthesisOptions = {
     maxSourcesInAnswer: options.maxSourcesInAnswer,
     showAllSources: options.showAllSources,
-    showEvidenceIds: options.showEvidenceIds
+    showEvidenceIds: options.showEvidenceIds,
+    rawEvidenceSummary: options.rawEvidenceSummary
   };
   if (options.fromRunId) {
     await waitForRun(options.cwd, options.fromRunId, options.timeoutMs ?? 0);
-    return askResultFromRun(options.cwd, options.fromRunId, options.rawUserPrompt, synthesisOptions);
+    const provider = defaultAnswerSynthesisProvider(options.cwd, options.fromRunId, options);
+    return askResultFromRunWithSynthesis(options.cwd, options.fromRunId, options.rawUserPrompt, synthesisOptions, provider, options.timeoutMs);
   }
   if (!options.rawUserPrompt?.trim()) throw new Error("codex-hardflow ask requires a question.");
   const runId = options.runId ?? `run-ask-${randomUUID()}`;
@@ -350,6 +422,7 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
     mode: progressMode,
     isTty: options.isProgressTty,
     intervalMs: options.progressIntervalMs,
+    fancy: options.fancyProgress,
     write: options.progressWriter ?? (() => undefined)
   });
   let interval: NodeJS.Timeout | undefined;
@@ -400,8 +473,11 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
         noOrdinaryWebFallback: true
       };
     }
+    renderer.render({ ...progressSnapshot(options.cwd, completed.runId, startedAt), status: "synthesizing", event: "synthesizing" }, true);
+    const provider = defaultAnswerSynthesisProvider(options.cwd, completed.runId, options);
+    const result = await askResultFromRunWithSynthesis(options.cwd, completed.runId, options.rawUserPrompt, synthesisOptions, provider, options.timeoutMs);
     renderer.render({ ...progressSnapshot(options.cwd, completed.runId, startedAt), event: "completed" }, true);
-    return askResultFromRun(options.cwd, completed.runId, options.rawUserPrompt, synthesisOptions);
+    return result;
   } finally {
     if (interval) clearInterval(interval);
     renderer.finish();

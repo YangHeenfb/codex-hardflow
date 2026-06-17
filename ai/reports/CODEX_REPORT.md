@@ -1,5 +1,97 @@
 # Codex Report
 
+## Report Entry: Ask Final Synthesis And Progress Renderer
+
+### Task
+
+Fix `codex-hardflow ask` final answer synthesis and progress display without
+changing the SDK runner, daemon/job architecture, coverage policy, computed
+confidence, hidden validator, or diagnostics experiments.
+
+### Summary
+
+The ask path now has a distinct language-aware final synthesis step:
+
+- Added `answerSynthesisProvider` support for `codex_cli`, `codex_sdk`, and
+  `mock`.
+- Real ask research defaults to isolated `codex_cli` synthesis after strict
+  research completes.
+- Mock ask runs infer the mock synthesis provider, including `--from-run`, so
+  tests do not call real Codex.
+- Final answer body is synthesized from EvidenceLedger instead of directly
+  pasting worker evidence claims as bullets.
+- Localized headings, coverage summary, caveats, and run info remain in the
+  requested or dominant user language.
+- Source titles, URLs, evidence IDs, package/API names, product names, and paper
+  titles are preserved.
+- Added `OutputLanguagePolicy.confidence`.
+
+Progress output was redesigned:
+
+- `--progress auto|minimal|quiet|verbose|json`.
+- TTY text progress clears and rewrites a single stderr line.
+- `finish()` clears the progress line and emits a clean newline before final
+  stdout output or errors.
+- Non-TTY progress suppresses duplicate status lines.
+- `--json` ask output suppresses progress by default unless progress is
+  explicitly requested.
+- Added `--fancy-progress`, `--answer-synthesis-provider`, and
+  `--raw-evidence-summary`.
+
+### Files Changed
+
+- `src/ask/answerSynthesis.ts`
+- `src/ask/answerSynthesisProvider.ts`
+- `src/ask/askRunner.ts`
+- `src/ask/progressRenderer.ts`
+- `src/cli.ts`
+- `src/flagParser.ts`
+- `src/i18n/languagePolicy.ts`
+- `src/internalEnv.ts`
+- `tests/askCli.test.ts`
+- `tests/askOutput.test.ts`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Smoke
+
+Ran mock smoke:
+
+`codex-hardflow ask "agent 记忆管理方面现在有什么前沿方案？" --router-provider mock --worker-provider mock --answer-synthesis-provider mock --progress quiet`
+
+Result:
+
+- Chinese headings and answer body.
+- No raw `Mock evidence for ...` claim bullets in the main answer.
+- Source titles and URLs preserved.
+- No duplicated source/caveat sections.
+
+### Verification
+
+- `npm run build`: passed.
+- `npm test`: passed, 30 test files and 262 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed, package entry count `213`.
+
+### Safety
+
+- No SDK runner changes.
+- No daemon/job architecture changes.
+- No coverage policy changes.
+- No computed confidence work.
+- No hidden validator work.
+- No large diagnostics experiment.
+- No global files changed.
+- No `install-global` run.
+
+### Risks / Follow-Up
+
+- Real ask runs now perform an additional isolated `codex_cli` synthesis step
+  after research. If the local Codex CLI synthesis provider is unavailable, ask
+  falls back to a localized evidence summary with an explicit caveat.
+- The mock smoke validates formatting and language behavior without running a
+  real SDK research job.
+
 ## Report Entry: Persist Status File Policy And Remove Next Question Blocks
 
 ### Task

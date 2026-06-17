@@ -2,6 +2,7 @@ export interface OutputLanguagePolicy {
   requestedLanguage: string | null;
   detectedUserLanguage: string;
   outputLanguage: string;
+  confidence: number;
   reason: string;
 }
 
@@ -49,12 +50,23 @@ function scoreLanguage(spec: LanguageSpec, text: string): number {
   return score;
 }
 
-function dominantLanguage(text: string): LanguageSpec {
+function dominantLanguageScore(text: string): { spec: LanguageSpec; score: number; confidence: number } {
   const scores = LANGUAGE_SPECS.map((spec) => ({ spec, score: scoreLanguage(spec, text) })).sort((a, b) => b.score - a.score);
   const best = scores[0];
-  if (best && best.score > 0) return best.spec;
-  if (/^[\x00-\x7f\s\p{P}\p{N}]+$/u.test(text)) return LANGUAGE_SPECS.find((spec) => spec.code === "en") ?? LANGUAGE_SPECS[1];
-  return { code: "same_as_user", name: "same_as_user", explicit: [] };
+  const second = scores[1];
+  if (best && best.score > 0) {
+    const margin = second ? best.score - second.score : best.score;
+    const confidence = Math.max(0.45, Math.min(0.98, 0.55 + margin / Math.max(best.score + (second?.score ?? 0), 1)));
+    return { spec: best.spec, score: best.score, confidence };
+  }
+  if (/^[\x00-\x7f\s\p{P}\p{N}]+$/u.test(text)) {
+    return { spec: LANGUAGE_SPECS.find((spec) => spec.code === "en") ?? LANGUAGE_SPECS[1], score: 1, confidence: 0.55 };
+  }
+  return { spec: { code: "same_as_user", name: "same_as_user", explicit: [] }, score: 0, confidence: 0.35 };
+}
+
+function dominantLanguage(text: string): LanguageSpec {
+  return dominantLanguageScore(text).spec;
 }
 
 function lastSentence(text: string): string {
@@ -67,12 +79,14 @@ function lastSentence(text: string): string {
 
 export function resolveOutputLanguagePolicy(prompt: string): OutputLanguagePolicy {
   const explicit = explicitLanguage(prompt);
-  const detected = dominantLanguage(prompt);
+  const detectedScore = dominantLanguageScore(prompt);
+  const detected = detectedScore.spec;
   if (explicit) {
     return {
       requestedLanguage: explicit.name,
       detectedUserLanguage: detected.name,
       outputLanguage: explicit.name,
+      confidence: 0.99,
       reason: "User explicitly requested the answer language."
     };
   }
@@ -84,6 +98,7 @@ export function resolveOutputLanguagePolicy(prompt: string): OutputLanguagePolic
     requestedLanguage: null,
     detectedUserLanguage: chosen.name,
     outputLanguage: chosen.name,
+    confidence: chosen.code === detected.code ? detectedScore.confidence : 0.62,
     reason: "No explicit language was requested; using the dominant user prompt language."
   };
 }

@@ -52,6 +52,9 @@ interface Labels {
   evidenceItemCount: string;
   coverageScore: string;
   fullReport: string;
+  moreSources: string;
+  totalEvidenceCoverage: string;
+  synthesisProviderUnavailable: string;
 }
 
 const EN: Labels = {
@@ -79,7 +82,10 @@ const EN: Labels = {
   sourceCount: "sources",
   evidenceItemCount: "evidence items",
   coverageScore: "coverage score",
-  fullReport: "Full report"
+  fullReport: "Full report",
+  moreSources: "more sources; use --show-all-sources for the full list",
+  totalEvidenceCoverage: "Total evidence",
+  synthesisProviderUnavailable: "Answer synthesis provider unavailable; showing evidence summary."
 };
 
 const LABELS: Record<string, Labels> = {
@@ -109,7 +115,10 @@ const LABELS: Record<string, Labels> = {
     sourceCount: "来源数",
     evidenceItemCount: "证据项",
     coverageScore: "覆盖分数",
-    fullReport: "完整报告"
+    fullReport: "完整报告",
+    moreSources: "个更多来源；使用 --show-all-sources 查看完整列表",
+    totalEvidenceCoverage: "证据覆盖",
+    synthesisProviderUnavailable: "答案合成 provider 不可用；当前显示证据摘要。"
   },
   ja: {
     question: "質問",
@@ -136,7 +145,10 @@ const LABELS: Record<string, Labels> = {
     sourceCount: "ソース数",
     evidenceItemCount: "証拠項目",
     coverageScore: "カバレッジスコア",
-    fullReport: "完全なレポート"
+    fullReport: "完全なレポート",
+    moreSources: "件の追加ソース。完全な一覧は --show-all-sources を使用",
+    totalEvidenceCoverage: "証拠カバレッジ",
+    synthesisProviderUnavailable: "回答合成 provider を利用できないため、証拠概要を表示します。"
   },
   es: {
     question: "Pregunta",
@@ -163,7 +175,10 @@ const LABELS: Record<string, Labels> = {
     sourceCount: "fuentes",
     evidenceItemCount: "elementos de evidencia",
     coverageScore: "puntuación de cobertura",
-    fullReport: "Reporte completo"
+    fullReport: "Reporte completo",
+    moreSources: "fuentes más; usa --show-all-sources para ver la lista completa",
+    totalEvidenceCoverage: "Cobertura de evidencia",
+    synthesisProviderUnavailable: "El proveedor de síntesis no está disponible; se muestra un resumen de evidencia."
   },
   fr: { ...EN, question: "Question", answer: "Réponse basée sur les preuves HardFlow", coverage: "Couverture", sources: "Sources", caveats: "Réserves", runInfo: "Informations d'exécution" },
   de: { ...EN, question: "Frage", answer: "Antwort basierend auf HardFlow-Belegen", coverage: "Abdeckung", sources: "Quellen", caveats: "Hinweise", runInfo: "Laufinformationen" },
@@ -183,6 +198,10 @@ export interface AnswerSynthesisOptions {
   maxSourcesInAnswer?: number;
   showAllSources?: boolean;
   showEvidenceIds?: boolean;
+  rawEvidenceSummary?: boolean;
+  answerBody?: string;
+  synthesisWarning?: string | null;
+  fullReportPath?: string;
 }
 
 export interface AnswerSynthesisResult {
@@ -212,9 +231,43 @@ export function buildCoverageSummary(report: ResearchReport, items: EvidenceItem
   };
 }
 
+const BUCKET_PRIORITY: Record<string, number> = {
+  official_docs: 0,
+  academic: 1,
+  security: 2,
+  github: 3,
+  package_registry: 4,
+  blogs_engineering: 5,
+  competitors: 6,
+  codex_default_discovery: 7,
+  local_repo: 8,
+  community: 9
+};
+
+function confidenceRank(value: string): number {
+  if (/high/i.test(value)) return 0;
+  if (/medium/i.test(value)) return 1;
+  if (/low/i.test(value)) return 2;
+  return 3;
+}
+
 function buildSourceSummary(items: EvidenceItem[], limit: number, showEvidenceIds: boolean): AskSourceSummary[] {
-  return items
+  const seen = new Set<string>();
+  return [...items]
     .filter((item) => !isNoSignalEvidence(item))
+    .sort((a, b) => {
+      const bucketDelta = (BUCKET_PRIORITY[a.bucket] ?? 50) - (BUCKET_PRIORITY[b.bucket] ?? 50);
+      if (bucketDelta !== 0) return bucketDelta;
+      const confidenceDelta = confidenceRank(a.confidence) - confidenceRank(b.confidence);
+      if (confidenceDelta !== 0) return confidenceDelta;
+      return a.title.localeCompare(b.title);
+    })
+    .filter((item) => {
+      const key = `${item.bucket}|${item.urlOrRef || item.title}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .slice(0, limit)
     .map((item) => ({
       id: showEvidenceIds ? item.id : "",
@@ -224,6 +277,57 @@ function buildSourceSummary(items: EvidenceItem[], limit: number, showEvidenceId
       claim: item.claim,
       confidence: item.confidence
     }));
+}
+
+function bucketList(items: EvidenceItem[]): string {
+  return Array.from(new Set(items.filter((item) => !isNoSignalEvidence(item)).map((item) => item.bucket)))
+    .sort((a, b) => (BUCKET_PRIORITY[a] ?? 50) - (BUCKET_PRIORITY[b] ?? 50))
+    .join(", ");
+}
+
+function fallbackAnswerBody(labels: Labels, policy: OutputLanguagePolicy, coverageSummary: AskCoverageSummary, supportingItems: EvidenceItem[]): string {
+  const buckets = bucketList(supportingItems) || "n/a";
+  const code = outputLanguageCode(policy.outputLanguage);
+  if (code === "zh") {
+    return [
+      `本次 HardFlow 研究收集了 ${coverageSummary.evidenceItemCount} 条证据，覆盖 ${coverageSummary.completedRequiredBucketCount}/${coverageSummary.requiredBucketCount} 个必查来源桶。`,
+      `证据主要来自这些来源桶：${buckets}。`,
+      "下面的回答是基于已收集证据做出的保守摘要；产品名、论文名、API 名和 URL 保持原文。"
+    ].join("\n");
+  }
+  if (code === "ja") {
+    return [
+      `今回の HardFlow 研究では ${coverageSummary.evidenceItemCount} 件の証拠を収集し、必須ソースバケット ${coverageSummary.completedRequiredBucketCount}/${coverageSummary.requiredBucketCount} 件をカバーしました。`,
+      `主な証拠バケット: ${buckets}.`,
+      "以下は収集済み証拠に基づく保守的な要約です。製品名、論文名、API 名、URL は原文のままです。"
+    ].join("\n");
+  }
+  if (code === "es") {
+    return [
+      `HardFlow reunió ${coverageSummary.evidenceItemCount} elementos de evidencia y cubrió ${coverageSummary.completedRequiredBucketCount}/${coverageSummary.requiredBucketCount} buckets requeridos.`,
+      `Los buckets principales son: ${buckets}.`,
+      "La respuesta siguiente es un resumen conservador basado en la evidencia recopilada; nombres de productos, papers, APIs y URLs se mantienen sin traducir."
+    ].join("\n");
+  }
+  return [
+    `HardFlow collected ${coverageSummary.evidenceItemCount} evidence items and covered ${coverageSummary.completedRequiredBucketCount}/${coverageSummary.requiredBucketCount} required buckets.`,
+    `The main evidence buckets are: ${buckets}.`,
+    "The answer below is a conservative synthesis from collected evidence; product names, paper titles, API names, and URLs are left unchanged."
+  ].join("\n");
+}
+
+function formatSourceLines(sourceSummary: AskSourceSummary[], showEvidenceIds: boolean): string[] {
+  const lines: string[] = [];
+  let currentBucket = "";
+  for (const item of sourceSummary) {
+    if (item.bucket !== currentBucket) {
+      currentBucket = item.bucket;
+      lines.push(`${currentBucket}:`);
+    }
+    const id = showEvidenceIds && item.id ? `[${item.id}] ` : "";
+    lines.push(`- ${id}${item.title} ${item.urlOrRef}`);
+  }
+  return lines;
 }
 
 export function synthesizeResearchAnswer(
@@ -237,8 +341,8 @@ export function synthesizeResearchAnswer(
   const labels = labelsForLanguage(policy.outputLanguage);
   const supportingItems = items.filter((item) => !isNoSignalEvidence(item));
   const maxSources = options.showAllSources ? Math.max(supportingItems.length, 1) : options.maxSourcesInAnswer ?? 8;
-  const findings = report.useful_findings.length > 0 ? report.useful_findings.slice(0, 8) : supportingItems.map((item) => item.claim).slice(0, 8);
   const caveats = [
+    ...(options.synthesisWarning ? [`${labels.synthesisProviderUnavailable} ${options.synthesisWarning}`] : []),
     ...(report.status === "degraded" ? [`${labels.degraded}: research_report status is degraded.`] : []),
     ...(report.failure_reason ? [`${labels.failed}: ${report.failure_reason}`] : []),
     ...(report.searched_but_no_signal.length > 0 ? [`${labels.searchedButNoSignal}: ${report.searched_but_no_signal.join(", ")}`] : []),
@@ -248,35 +352,38 @@ export function synthesizeResearchAnswer(
   ];
   const coverageSummary = buildCoverageSummary(report, items, coverage);
   const sourceSummary = buildSourceSummary(supportingItems, maxSources, options.showEvidenceIds === true);
-  const idPrefix = (item: EvidenceItem): string => (options.showEvidenceIds ? `[${item.id}] ` : "");
-  const evidenceLines =
-    findings.length > 0
-      ? findings.map((finding, index) => `${index + 1}. ${finding}`)
-      : [labels.noFindings];
+  const answerBody = options.answerBody?.trim() || fallbackAnswerBody(labels, policy, coverageSummary, supportingItems);
   const lines = [
     `${labels.runInfo}: runId=${report.runId}, status=${report.status}, route=research`,
     "",
     `${labels.question}: ${question}`,
     "",
     `${labels.answer}:`,
-    ...evidenceLines,
+    answerBody,
     "",
     `${labels.coverage}: ${coverageSummary.coverageScore ?? "n/a"} ${labels.coverageScore}; ${coverageSummary.completedRequiredBucketCount}/${coverageSummary.requiredBucketCount} ${labels.requiredBuckets}; ${supportingItems.length} ${labels.evidenceItemCount}.`
   ];
+  if (outputLanguageCode(policy.outputLanguage) === "zh") {
+    lines.push(`${labels.totalEvidenceCoverage}: 共 ${coverageSummary.evidenceItemCount} 条证据，覆盖 ${coverageSummary.completedRequiredBucketCount}/${coverageSummary.requiredBucketCount} 个来源桶。`);
+  }
   if (sourceSummary.length > 0) {
     lines.push(
       "",
       `${labels.sources}:`,
-      ...supportingItems.slice(0, maxSources).map((item) => `- ${idPrefix(item)}${item.title} (${item.bucket}) ${item.urlOrRef}`)
+      ...formatSourceLines(sourceSummary, options.showEvidenceIds === true)
     );
     if (!options.showAllSources && supportingItems.length > maxSources) {
-      lines.push(`- ... ${supportingItems.length - maxSources} more; use --show-all-sources for the full list.`);
+      const hiddenCount = supportingItems.length - maxSources;
+      lines.push(outputLanguageCode(policy.outputLanguage) === "zh" ? `- ... ${hiddenCount}${labels.moreSources}` : `- ... ${hiddenCount} ${labels.moreSources}.`);
     }
+  }
+  if (options.rawEvidenceSummary && supportingItems.length > 0) {
+    lines.push("", `${labels.evidence}:`, ...supportingItems.slice(0, maxSources).map((item) => `- ${item.claim}`));
   }
   if (caveats.length > 0) {
     lines.push("", `${labels.caveats}:`, ...caveats.map((caveat) => `- ${caveat}`));
   }
-  lines.push("", `${labels.fullReport}: ${report.runId}`);
+  lines.push("", `${labels.fullReport}: ${options.fullReportPath ?? report.runId}`);
   return {
     answer: lines.join("\n"),
     caveats,

@@ -1,4 +1,4 @@
-export type HardflowInternalPurpose = "router" | "sdk_worker" | "strict_research" | "diagnostics" | "daemon_router" | "daemon_worker";
+export type HardflowInternalPurpose = "router" | "sdk_worker" | "strict_research" | "diagnostics" | "daemon_router" | "daemon_worker" | "answer_synthesis";
 
 export interface HardflowInternalContext {
   internal: boolean;

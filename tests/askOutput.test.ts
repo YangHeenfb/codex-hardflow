@@ -30,9 +30,11 @@ describe("ask output language policy", () => {
 
   it("detects explicit and dominant output languages", () => {
     expect(resolveOutputLanguagePolicy("agent 记忆管理有什么前沿方案？").outputLanguage).toBe("Chinese");
+    expect(resolveOutputLanguagePolicy("agent 记忆管理有什么前沿方案？").confidence).toBeGreaterThan(0);
     expect(resolveOutputLanguagePolicy("What are current solutions? 用中文回答").outputLanguage).toBe("Chinese");
     expect(resolveOutputLanguagePolicy("这个项目怎么改? answer in English").outputLanguage).toBe("English");
     expect(resolveOutputLanguagePolicy("日本語で答えて。agent memory の方法は？").outputLanguage).toBe("Japanese");
+    expect(resolveOutputLanguagePolicy("한국어로 답해. agent memory 방법은?").outputLanguage).toBe("Korean");
     expect(resolveOutputLanguagePolicy("responde en español: current agent memory").outputLanguage).toBe("Spanish");
   });
 
@@ -48,9 +50,11 @@ describe("ask output language policy", () => {
 
     expect(result.outputLanguagePolicy?.outputLanguage).toBe("Chinese");
     expect(result.answer).toContain("问题:");
-    expect(result.answer).toContain("基于 HardFlow 证据的回答:");
+    expect(result.answer).toContain("回答:");
     expect(result.answer).toContain("覆盖情况:");
     expect(result.answer).toContain("主要来源:");
+    expect(result.answer).toContain("共 ");
+    expect(result.answer).not.toContain("Mock evidence for official_docs.");
     expect(result.answer).toContain("Mock official_docs source");
     expect(result.answer).toContain("mock://official_docs");
   });
@@ -74,7 +78,7 @@ describe("ask output language policy", () => {
     });
 
     expect(ja.answer).toContain("質問:");
-    expect(ja.answer).toContain("HardFlow の証拠に基づく回答:");
+    expect(ja.answer).toContain("回答:");
     expect(es.answer).toContain("Pregunta:");
     expect(es.answer).toContain("Respuesta basada en evidencia de HardFlow:");
   });
@@ -140,7 +144,7 @@ describe("ask progress renderer", () => {
     const renderer = new AskProgressRenderer({ mode: "auto", isTty: true, write: (message) => writes.push(message), now: () => 0 });
     renderer.render({ runId: "run-a", status: "researching", completedBucketCount: 1, runningBucketCount: 2, failedBucketCount: 0 }, true);
 
-    expect(writes[0].startsWith("\rHardFlow researching")).toBe(true);
+    expect(writes[0].startsWith("\x1b[2K\rHardFlow researching")).toBe(true);
   });
 
   it("finish adds a newline after a TTY carriage-return status line", () => {
@@ -149,7 +153,7 @@ describe("ask progress renderer", () => {
     renderer.render({ runId: "run-a", status: "pending" }, true);
     renderer.finish();
 
-    expect(writes).toEqual([expect.stringMatching(/^\rHardFlow pending/), "\n"]);
+    expect(writes).toEqual([expect.stringMatching(/^\x1b\[2K\rHardFlow queued/), "\x1b[2K\r\n"]);
   });
 
   it("auto non-TTY suppresses duplicate progress lines", () => {
@@ -190,5 +194,13 @@ describe("ask progress renderer", () => {
 
     expect(parsed.event).toBe("progress");
     expect(parsed.completedBucketCount).toBe(2);
+  });
+
+  it("minimal TTY mode clears the current line", () => {
+    const writes: string[] = [];
+    const renderer = new AskProgressRenderer({ mode: "minimal", isTty: true, write: (message) => writes.push(message), now: () => 0 });
+    renderer.render({ runId: "run-minimal", status: "researching", elapsedMs: 65_000 }, true);
+
+    expect(writes[0]).toContain("\x1b[2K\rHardFlow researching 01:05");
   });
 });

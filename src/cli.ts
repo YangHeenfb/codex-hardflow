@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { runAsk, type AskResult } from "./ask/askRunner.js";
 import type { AskProgressMode } from "./ask/progressRenderer.js";
+import type { AnswerSynthesisProvider } from "./ask/answerSynthesisProvider.js";
 import { cliPathStatus } from "./cliPaths.js";
 import { codexRunnerStatus } from "./codexRunner.js";
 import { globalAgentsMdHasHardflowBlock, installGlobal, SDK_VERSION, type InstallMode } from "./config.js";
@@ -141,8 +142,14 @@ function workerProviderFlag(value: string | undefined): HardflowWorkerProvider |
 function askProgressModeFlag(value: string | undefined, noProgress: boolean): AskProgressMode {
   if (noProgress) return "quiet";
   if (value === undefined) return "auto";
-  if (value === "auto" || value === "quiet" || value === "verbose" || value === "json") return value;
+  if (value === "auto" || value === "minimal" || value === "quiet" || value === "verbose" || value === "json") return value;
   throw new Error(`Invalid --progress: ${value}`);
+}
+
+function answerSynthesisProviderFlag(value: string | undefined): AnswerSynthesisProvider | undefined {
+  if (value === undefined) return undefined;
+  if (value === "codex_cli" || value === "codex_sdk" || value === "mock") return value;
+  throw new Error(`Invalid --answer-synthesis-provider: ${value}`);
 }
 
 function printAskText(result: AskResult): void {
@@ -388,9 +395,17 @@ async function main(): Promise<void> {
           throw new Error("Usage: codex-hardflow ask [--json] [--async] [--from-run <runId>] [--run-id <runId>] [--input-json <path>] \"question...\"");
         }
         const json = booleanFlag(parsed.flags, "json");
+        const progressFlagExplicit =
+          parsed.flags.progress !== undefined ||
+          booleanFlag(parsed.flags, "show-progress") ||
+          booleanFlag(parsed.flags, "no-progress") ||
+          booleanFlag(parsed.flags, "fancy-progress");
         const progressMode = booleanFlag(parsed.flags, "show-progress")
           ? "verbose"
-          : askProgressModeFlag(stringFlag(parsed.flags, "progress"), booleanFlag(parsed.flags, "no-progress") || booleanFlag(parsed.flags, "async"));
+          : askProgressModeFlag(
+              stringFlag(parsed.flags, "progress"),
+              booleanFlag(parsed.flags, "no-progress") || booleanFlag(parsed.flags, "async") || (json && !progressFlagExplicit)
+            );
         const result = await runAsk({
           cwd,
           rawUserPrompt,
@@ -405,11 +420,14 @@ async function main(): Promise<void> {
           maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
           progressMode,
           progressIntervalMs: numberFlag(parsed.flags, "progress-interval-ms"),
+          fancyProgress: booleanFlag(parsed.flags, "fancy-progress"),
           isProgressTty: process.stderr.isTTY,
           progressWriter: (message) => process.stderr.write(message),
+          answerSynthesisProvider: answerSynthesisProviderFlag(stringFlag(parsed.flags, "answer-synthesis-provider")),
           maxSourcesInAnswer: numberFlag(parsed.flags, "max-sources-in-answer"),
           showAllSources: booleanFlag(parsed.flags, "show-all-sources"),
-          showEvidenceIds: booleanFlag(parsed.flags, "show-evidence-ids")
+          showEvidenceIds: booleanFlag(parsed.flags, "show-evidence-ids"),
+          rawEvidenceSummary: booleanFlag(parsed.flags, "raw-evidence-summary")
         });
         if (json) printJson(result);
         else printAskText(result);
@@ -897,7 +915,7 @@ async function main(): Promise<void> {
         printJson({
           usage: [
             "codex-hardflow status",
-            "codex-hardflow ask [--json] [--async] [--from-run <runId>] [--run-id <runId>] [--timeout-ms <ms>] [--coverage-mode exhaustive|balanced|fast] [--parallel-policy all_required|adaptive|conservative] [--router-provider codex_cli|codex_sdk|mock|openai_structured_output] [--worker-provider codex_sdk|codex_cli|source_adapters|mock] [--max-sources-per-worker <n>] [--progress auto|quiet|verbose|json] [--progress-interval-ms <ms>] [--max-sources-in-answer <n>] [--show-all-sources] [--show-evidence-ids] \"question...\"",
+            "codex-hardflow ask [--json] [--async] [--from-run <runId>] [--run-id <runId>] [--timeout-ms <ms>] [--coverage-mode exhaustive|balanced|fast] [--parallel-policy all_required|adaptive|conservative] [--router-provider codex_cli|codex_sdk|mock|openai_structured_output] [--worker-provider codex_sdk|codex_cli|source_adapters|mock] [--answer-synthesis-provider codex_cli|codex_sdk|mock] [--max-sources-per-worker <n>] [--progress auto|minimal|quiet|verbose|json] [--progress-interval-ms <ms>] [--max-sources-in-answer <n>] [--show-all-sources] [--show-evidence-ids] [--raw-evidence-summary] \"question...\"",
             "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
             "codex-hardflow research --run-id <runId> \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",
