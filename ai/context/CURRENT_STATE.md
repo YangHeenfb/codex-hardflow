@@ -233,3 +233,54 @@ Next Codex prompt request:
 
 - Please provide the exact next prompt the user should give Codex to address
   any PR review findings or proceed toward merge.
+
+## Current State Update: Job/Daemon Automatic Trigger Architecture
+
+Date: 2026-06-17
+
+Branch:
+
+- `main`
+
+Current objective:
+
+- Commit and push the implementation that changes codex-hardflow automatic
+  triggering from hook-synchronous route/research execution to a short hook plus
+  background job/daemon model.
+
+Implementation status:
+
+- `UserPromptSubmit` now creates a marker, writes `hook_input.json`, and enqueues
+  `.agent/hardflow/jobs/<runId>.json`.
+- `UserPromptSubmit` no longer runs Codex CLI/SDK route or strict research
+  synchronously.
+- `Stop` hook now checks job status and blocks while jobs are
+  `pending`, `routing`, or `researching`.
+- `Stop` hook blocks failed/cancelled jobs and only proceeds to existing
+  router/report/evidence gates for completed jobs.
+- Added job store/schema, daemon runner, router provider abstraction, and CLI
+  commands:
+  - `codex-hardflow daemon run|status|stop`
+  - `codex-hardflow jobs list|show|run-once|run-pending`
+- Daemon-local Codex execution uses isolated
+  `.agent/hardflow/runs/<runId>/codex-home` and internal hardflow env guards.
+
+Verification:
+
+- `npm run build`: passed.
+- `npm test`: passed, 27 test files and 226 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed.
+
+Safety notes:
+
+- No OpenAI API router was implemented.
+- No computed confidence work was done.
+- No hidden validator runner work was done.
+- No large diagnostics experiment was run.
+- No global files were modified.
+- `.agent/hardflow/` runtime output from tests was removed and not staged.
+
+Next action:
+
+- Commit and push the job/daemon architecture changes on `main`.

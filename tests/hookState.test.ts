@@ -9,10 +9,10 @@ import { createHookMarker, markerPathFor, updateMarker, type HookMarker } from "
 import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
 import { stopValidationGate } from "../src/hooks/stopValidationGate.js";
 import { addManualSourceToReport, buildResearchReport, runResearch } from "../src/researchOrchestrator.js";
-import { currentResearchReportPath, legacyResearchReportPath, repoHash, researchRunEvidenceLedgerPath, researchRunReportPath } from "../src/paths.js";
+import { currentResearchReportPath, legacyResearchReportPath, repoHash, researchRunEvidenceLedgerPath, researchRunReportPath, researchRunRouterTracePath } from "../src/paths.js";
 import { broadResearchRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
 import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
-import { failingRouteRunner, fakeRouteRunner, fakeStrictResearchRunner } from "./hookTestUtils.js";
+import { completeHardflowJob, createHardflowJob, failHardflowJob, readHardflowJob } from "../src/jobs/jobStore.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-hook-"));
@@ -79,7 +79,33 @@ function automaticResearchMarker(cwd: string, prompt: string, turnId: string): H
     input: { turnId }
   });
   writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId }, broadResearchRouterOutput, "llm", undefined, marker.turnId));
+  createJobForMarker(cwd, marker, "completed", "research");
   return marker;
+}
+
+function createJobForMarker(cwd: string, marker: HookMarker, status: "pending" | "completed" | "failed", route: "research" | "direct_answer" | "router_failed" = "research"): void {
+  if (!readHardflowJob(cwd, marker.runId)) {
+    createHardflowJob({
+      runId: marker.runId,
+      cwd,
+      rawUserPrompt: marker.rawUserPrompt ?? "prompt",
+      promptHash: marker.promptHash,
+      turnId: marker.turnId,
+      triggerSource: "hook_user_prompt_submit"
+    });
+  }
+  if (status === "completed") {
+    completeHardflowJob(cwd, marker.runId, {
+      route,
+      routerTracePath: researchRunRouterTracePath(cwd, marker.runId),
+      researchReportPath: route === "research" ? researchRunReportPath(cwd, marker.runId) : null,
+      evidenceLedgerPath: route === "research" ? researchRunEvidenceLedgerPath(cwd, marker.runId) : null,
+      threadIds: []
+    });
+  }
+  if (status === "failed") {
+    failHardflowJob(cwd, marker.runId, "router timed out", { route });
+  }
 }
 
 function directRouterOutput() {
@@ -116,8 +142,7 @@ describe("hook marker Stop gate", () => {
         turnId: "turn-schema",
         sessionId: "thread-schema"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(broadResearchRouterOutput) }
+      process.cwd()
     );
 
     expect(result.decision).toBe("allow");
@@ -132,14 +157,12 @@ describe("hook marker Stop gate", () => {
     expect(marker.requiresSourceMatrix).toBe(false);
     expect(marker.runId).toBe("run-turn-schema");
     expect(marker.maxBlocks).toBe(2);
-    expect(marker.routeStatus).toBe("routed");
+    expect(marker.routeStatus).toBe("router_required");
     expect(marker.routerBlockCount).toBe(0);
-    expect(marker.routerPreflightSource).toBe("user_prompt_submit");
-    expect(marker.routerPreflightSucceeded).toBe(true);
-    expect(marker.routerRoute).toBe("research");
+    expect(readHardflowJob(cwd, marker.runId)?.status).toBe("pending");
   });
 
-  it("fails closed when router_required marker has no router_trace and fallback fails", () => {
+  it("fails closed when a programmatic marker has no job", () => {
     const cwd = tempRepo();
     const marker = createHookMarker({
       cwd,
@@ -155,13 +178,9 @@ describe("hook marker Stop gate", () => {
       input: { turnId: "turn-router-required" }
     });
 
-    const first = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: failingRouteRunner("router unavailable") });
-    expect(first.decision).toBe("block");
-    expect(String(first.reason)).toContain("fails closed");
-
-    const second = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: failingRouteRunner("router unavailable") });
-    expect(second.decision).toBe("block");
-    expect(second.hardflowStatus).toBe("router_failed_fail_closed");
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("hardflow_job_missing");
   });
 
   it("Stop bypasses internal SDK/router calls without enforcing gates", () => {
@@ -178,7 +197,7 @@ describe("hook marker Stop gate", () => {
     expect(readHookEvents(cwd, "run-parent").some((event) => event.eventName === "StopInternalBypass" && event.internalPurpose === "sdk_worker")).toBe(true);
   });
 
-  it("auto-routes missing router_trace to direct_answer and allows", () => {
+  it("blocks while a queued job is pending", () => {
     const cwd = tempRepo();
     const marker = createHookMarker({
       cwd,
@@ -194,13 +213,14 @@ describe("hook marker Stop gate", () => {
       input: { turnId: "turn-auto-route-direct" }
     });
 
-    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: fakeRouteRunner(directRouterOutput()) });
+    createJobForMarker(cwd, marker, "pending");
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
-    expect(result.decision).toBe("allow");
-    expect(String(result.notice)).toContain("direct_answer");
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("hardflow_job_pending");
   });
 
-  it("auto-routes missing router_trace to research and auto-runs strict research", () => {
+  it("does not auto-run route or strict research for pending research jobs", () => {
     const cwd = tempRepo();
     const marker = createHookMarker({
       cwd,
@@ -216,16 +236,14 @@ describe("hook marker Stop gate", () => {
       input: { turnId: "turn-auto-route-research" }
     });
 
-    const result = stopValidationGate(
-      { cwd, turnId: marker.turnId },
-      { routeRunner: fakeRouteRunner(broadResearchRouterOutput), strictResearchRunner: fakeStrictResearchRunner("completed") }
-    );
+    createJobForMarker(cwd, marker, "pending");
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
     expect(result.decision).toBe("block");
-    expect(result.hardflowStatus).toBe("strict_research_auto_run_completed");
+    expect(result.hardflowStatus).toBe("hardflow_job_pending");
   });
 
-  it("fails closed for router_failed markers", () => {
+  it("blocks failed jobs before ordinary answers", () => {
     const cwd = tempRepo();
     const marker = createHookMarker({
       cwd,
@@ -241,11 +259,12 @@ describe("hook marker Stop gate", () => {
       input: { turnId: "turn-router-failed" }
     });
     updateMarker(marker, { routerPreflightFailureReason: "router timed out" });
+    createJobForMarker(cwd, marker, "failed", "router_failed");
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
     expect(result.decision).toBe("block");
-    expect(result.hardflowStatus).toBe("router_failed_fail_closed");
+    expect(result.hardflowStatus).toBe("hardflow_job_failed");
     expect(String(result.reason)).toContain("router timed out");
   });
 
@@ -274,6 +293,7 @@ describe("hook marker Stop gate", () => {
       risks: []
     });
     writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId }, direct, "llm", undefined, marker.turnId));
+    createJobForMarker(cwd, marker, "completed", "direct_answer");
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
     expect(result.decision).toBe("allow");
@@ -300,26 +320,26 @@ describe("hook marker Stop gate", () => {
     expect(String(result.reason)).toContain("requires strict_programmatic");
   });
 
-  it("auto-runs strict research for automatic research routes without strict report", () => {
+  it("blocks completed research jobs when strict report is still missing", () => {
     const cwd = tempRepo();
     const marker = automaticResearchMarker(cwd, "What are current practical solutions for agentic long horizon work? 中文回答", "turn-auto-research-missing");
 
-    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { strictResearchRunner: fakeStrictResearchRunner("completed") });
-
-    expect(result.decision).toBe("block");
-    expect(result.hardflowStatus).toBe("strict_research_auto_run_completed");
-    expect(String(result.reason)).toContain("Answer only from the generated run-owned research_report");
-  });
-
-  it("blocks ordinary answers when Stop auto-run strict research fails", () => {
-    const cwd = tempRepo();
-    const marker = automaticResearchMarker(cwd, "What are current practical solutions for agentic long horizon work? 中文回答", "turn-auto-research-auto-failed");
-
-    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { strictResearchRunner: fakeStrictResearchRunner("failed") });
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
     expect(result.decision).toBe("block");
     expect(result.hardflowStatus).toBe("strict_research_report_missing");
-    expect(String(result.reason)).toContain("fake strict research failed");
+    expect(String(result.reason)).toContain("Stop hook does not run strict research");
+  });
+
+  it("blocks ordinary answers when completed research job lacks a valid report", () => {
+    const cwd = tempRepo();
+    const marker = automaticResearchMarker(cwd, "What are current practical solutions for agentic long horizon work? 中文回答", "turn-auto-research-auto-failed");
+
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
+
+    expect(result.decision).toBe("block");
+    expect(result.hardflowStatus).toBe("strict_research_report_missing");
+    expect(String(result.reason)).toContain("research_report.json is missing");
   });
 
   it("blocks strict-looking research reports without sdk workers", async () => {
@@ -497,8 +517,9 @@ describe("hook marker Stop gate", () => {
       input: { turnId: "turn-max-blocks" }
     });
     updateMarker(marker, { blockCount: marker.maxBlocks });
+    createJobForMarker(cwd, marker, "completed", "research");
 
-    const result = stopValidationGate({ cwd, turnId: marker.turnId }, { routeRunner: failingRouteRunner("router unavailable") });
+    const result = stopValidationGate({ cwd, turnId: marker.turnId });
     expect(result.decision).toBe("block");
     expect(result.hardflowStatus).toBe("router_trace_missing_fail_closed");
   });

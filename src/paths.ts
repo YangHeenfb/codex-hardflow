@@ -99,6 +99,46 @@ export function researchRunRequestsDir(cwd: string, runId: string): string {
   return join(researchRunDir(cwd, runId), "research_requests");
 }
 
+export function hardflowProjectDir(cwd: string): string {
+  return join(resolve(cwd), ".agent", "hardflow");
+}
+
+export function hardflowJobsDir(cwd: string): string {
+  return join(hardflowProjectDir(cwd), "jobs");
+}
+
+export function hardflowJobPath(cwd: string, runId: string): string {
+  return join(hardflowJobsDir(cwd), `${safeReportSegment(runId)}.json`);
+}
+
+export function hardflowJobLockPath(cwd: string, runId: string): string {
+  return join(hardflowJobsDir(cwd), `${safeReportSegment(runId)}.lock`);
+}
+
+export function hardflowJobEventsPath(cwd: string): string {
+  return join(hardflowProjectDir(cwd), "job_events.jsonl");
+}
+
+export function hardflowRunsDir(cwd: string): string {
+  return join(hardflowProjectDir(cwd), "runs");
+}
+
+export function hardflowRunDir(cwd: string, runId: string): string {
+  return join(hardflowRunsDir(cwd), safeReportSegment(runId));
+}
+
+export function hardflowRunCodexHome(cwd: string, runId: string): string {
+  return join(hardflowRunDir(cwd, runId), "codex-home");
+}
+
+export function hardflowDaemonPidPath(cwd: string): string {
+  return join(hardflowProjectDir(cwd), "daemon.pid");
+}
+
+export function hardflowDaemonStopPath(cwd: string): string {
+  return join(hardflowProjectDir(cwd), "daemon.stop");
+}
+
 export function researchRunRequestPath(cwd: string, runId: string, requestId: string): string {
   return join(researchRunRequestsDir(cwd, runId), `${safeReportSegment(requestId)}.json`);
 }

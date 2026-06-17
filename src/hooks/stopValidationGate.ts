@@ -11,7 +11,8 @@ import { listEvidence } from "../coverage/evidenceLedger.js";
 import { blockingResearchRequests, failedBlockingResearchRequests, listResearchRequests } from "../research/researchRequest.js";
 import { readRouterTrace } from "../router/routerTrace.js";
 import type { RouterOutput } from "../router/routerSchema.js";
-import { defaultRoutePreflightRunner, defaultStrictResearchRunner, type RoutePreflightRunner, type StrictResearchRunner } from "./hookAutomation.js";
+import type { RoutePreflightRunner, StrictResearchRunner } from "./hookAutomation.js";
+import { readHardflowJob } from "../jobs/jobStore.js";
 
 type GateOutput = Record<string, unknown>;
 
@@ -276,74 +277,6 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
     return result;
   }
 
-  function rawPromptForMarker(): string | undefined {
-    if (typeof marker?.rawUserPrompt === "string" && marker.rawUserPrompt.trim().length > 0) return marker.rawUserPrompt;
-    if (typeof input.prompt === "string" && input.prompt.trim().length > 0) return input.prompt;
-    if (typeof input.user_prompt === "string" && input.user_prompt.trim().length > 0) return input.user_prompt;
-    if (typeof input.message === "string" && input.message.trim().length > 0) return input.message;
-    return undefined;
-  }
-
-  function autoRouteFallback(reason: string): { ok: boolean; routerOutput?: RouterOutput; reason?: string } {
-    if (!config.stopAutoRouteFallback) return { ok: false, reason };
-    if (marker.stopAutoRouteAttempted) return { ok: false, reason: `${reason} Stop auto-route fallback was already attempted and did not produce a usable router_trace.` };
-    const rawUserPrompt = rawPromptForMarker();
-    if (!rawUserPrompt) return { ok: false, reason: `${reason} Cannot retry route because the raw user prompt is unavailable.` };
-    const routeRunner = options.routeRunner ?? defaultRoutePreflightRunner;
-    marker = updateMarker(marker, { stopAutoRouteAttempted: true });
-    const result = routeRunner({
-      cwd,
-      command: marker.absoluteCommand,
-      runId: marker.runId,
-      rawUserPrompt,
-      timeoutMs: config.routePreflightTimeoutMs,
-      turnId: marker.turnId,
-      triggerSource: "stop_hook"
-    });
-    marker = updateMarker(marker, {
-      routeStatus: result.succeeded ? "routed" : "router_failed",
-      routerTracePath: result.tracePath,
-      routerRoute: result.trace?.route,
-      routerPreflightSource: "stop_hook",
-      routerPreflightSucceeded: result.succeeded,
-      routerPreflightFailureReason: result.succeeded ? undefined : result.failureReason,
-      routerPreflightCompletedAt: new Date().toISOString(),
-      stopAutoRouteFailureReason: result.succeeded ? undefined : result.failureReason
-    });
-    if (!result.succeeded || !result.trace?.routerOutput) {
-      return { ok: false, reason: result.failureReason ?? "Stop auto-route fallback did not produce routerOutput." };
-    }
-    return { ok: true, routerOutput: result.trace.routerOutput };
-  }
-
-  function autoRunStrictResearch(): { ok: boolean; reason?: string } {
-    if (!config.autoRunStrictResearchInStop) return { ok: false, reason: "Stop auto-run strict research is disabled." };
-    if (marker.strictResearchStopAttempted && !marker.strictResearchAutoRunCompletedAt) {
-      return { ok: false, reason: marker.strictResearchStopFailureReason ?? "Stop strict research auto-run was already attempted and failed." };
-    }
-    const rawUserPrompt = rawPromptForMarker();
-    if (!rawUserPrompt) return { ok: false, reason: "Cannot run strict research because the raw user prompt is unavailable." };
-    const strictRunner = options.strictResearchRunner ?? defaultStrictResearchRunner;
-    marker = updateMarker(marker, { strictResearchStopAttempted: true });
-    const result = strictRunner({
-      cwd,
-      command: marker.absoluteCommand,
-      runId: marker.runId,
-      rawUserPrompt,
-      timeoutMs: config.strictResearchStopTimeoutMs,
-      turnId: marker.turnId
-    });
-    if (!result.succeeded) {
-      marker = updateMarker(marker, { strictResearchStopFailureReason: result.failureReason ?? "strict research failed without a failure reason." });
-      return { ok: false, reason: result.failureReason ?? "strict research failed without a failure reason." };
-    }
-    marker = updateMarker(marker, {
-      strictResearchStopFailureReason: undefined,
-      strictResearchAutoRunCompletedAt: new Date().toISOString()
-    });
-    return { ok: true };
-  }
-
   if (markerExpired(marker)) {
     updateMarker(marker, { status: "expired" });
     return finish({ decision: "allow", notice: "codex-hardflow marker expired; Stop gate allowed." });
@@ -355,6 +288,26 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
     return finish({ decision: "allow", notice: "codex-hardflow maintenance marker does not require business executor_manifest.json." });
   }
 
+  if (marker.programmaticTrigger === true) {
+    const job = readHardflowJob(cwd, marker.runId);
+    if (!job) {
+      return finish(hardBlock(marker, `HardFlow job is missing for runId=${marker.runId}. Stop hook fails closed; hooks should enqueue .agent/hardflow/jobs/<runId>.json.`, "hardflow_job_missing"));
+    }
+    if (job.status === "pending" || job.status === "routing" || job.status === "researching") {
+      return finish(hardBlock(marker, `HardFlow job still running or pending. status=${job.status}, runId=${job.runId}. Run codex-hardflow jobs run-once --run-id ${job.runId} or keep daemon running.`, "hardflow_job_pending"));
+    }
+    if (job.status === "failed") {
+      return finish(hardBlock(marker, `HardFlow job failed: ${job.failureReason ?? "missing failureReason"}. Do not answer from ordinary web_search/manual notes unless the user explicitly approves downgrade.`, "hardflow_job_failed"));
+    }
+    if (job.status === "cancelled") {
+      return finish(hardBlock(marker, `HardFlow job was cancelled: ${job.failureReason ?? "cancelled"}.`, "hardflow_job_cancelled"));
+    }
+    if (job.status === "completed" && (job.route === "direct_answer" || job.route === "bypass")) {
+      updateMarker(marker, { status: "completed", routeStatus: "routed", routerRoute: job.route });
+      return finish({ decision: "allow", notice: `HardFlow job completed with route=${job.route}; no strict research run is required.` });
+    }
+  }
+
   let trace = readRouterTrace(cwd, marker.runId, marker.turnId);
   let routerOutput: RouterOutput | undefined = trace?.routerOutput;
   if (marker.routeStatus === "router_failed") {
@@ -364,14 +317,8 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
     }
     return finish(hardBlock(marker, `Router preflight failed: ${marker.routerPreflightFailureReason ?? routerOutput?.reasons?.[0] ?? "unknown failure"}. Ask the user whether to retry route or continue with a quick/direct answer; do not silently use ordinary web search.`, "router_failed_fail_closed"));
   }
-  if (!routerOutput || marker.routeStatus === "router_required") {
-    const fallback = autoRouteFallback("router_trace/routerOutput is missing for this hardflow marker.");
-    if (fallback.ok) {
-      trace = readRouterTrace(cwd, marker.runId, marker.turnId);
-      routerOutput = fallback.routerOutput ?? trace?.routerOutput;
-    } else {
-      return finish(hardBlock(marker, `${fallback.reason ?? "router_trace/routerOutput is missing."} Stop gate fails closed; maxBlocks cannot allow a missing router_trace.`, "router_trace_missing_fail_closed"));
-    }
+  if (!routerOutput) {
+    return finish(hardBlock(marker, "router_trace/routerOutput is missing for this hardflow marker. Stop hook does not run route; run codex-hardflow jobs run-once or daemon run.", "router_trace_missing_fail_closed"));
   }
   if (trace && (trace.owner ?? "parent") === "subagent" && (marker.requiresSourceMatrix || marker.requiresExecutorManifest || marker.requiresValidation)) {
     return finish(blockOrAllow(marker, "Parent router_trace is missing for this hardflow marker; a subagent router_trace cannot satisfy the parent Stop gate."));
@@ -402,23 +349,7 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
   if (automaticRouterResearch) {
     const current = currentReportForMarker(cwd, marker);
     if (!current.report) {
-      const autoRun = autoRunStrictResearch();
-      if (!autoRun.ok) {
-        return finish(
-          hardBlock(
-            marker,
-            `${current.reason ?? "strict research_report.json is missing."} Stop auto-run strict research failed: ${autoRun.reason ?? "unknown failure"}. Do not answer from ordinary web_search/manual notes.`,
-            "strict_research_report_missing"
-          )
-        );
-      }
-      return finish(
-        hardBlock(
-          marker,
-          "strict_programmatic research completed in Stop hook. Answer only from the generated run-owned research_report.json, coverage_plan.json, evidence_ledger.json, and sdk_worker_runs; do not use ordinary web_search/manual notes as a substitute.",
-          "strict_research_auto_run_completed"
-        )
-      );
+      return finish(hardBlock(marker, `${current.reason ?? "strict research_report.json is missing."} Stop hook does not run strict research; run codex-hardflow jobs run-once or daemon run.`, "strict_research_report_missing"));
     }
     if (current.report.runner_mode !== "strict_programmatic" && current.report.runner_mode !== "sdk_threads") {
       return finish(hardBlock(marker, `route=research requires strict_programmatic/sdk_threads research; runner_mode=${current.report.runner_mode} cannot satisfy it.`, "strict_research_wrong_runner"));

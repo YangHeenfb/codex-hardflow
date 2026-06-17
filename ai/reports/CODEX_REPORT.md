@@ -390,3 +390,106 @@ Next Codex prompt request:
 
 - Please provide the exact next prompt the user should give Codex to address
   any PR review findings or proceed toward merge.
+
+## Report Entry: Job/Daemon Automatic Trigger Architecture
+
+### Task
+
+Change codex-hardflow automatic triggering so hooks do not synchronously run
+Codex CLI/SDK route or long strict research. UserPromptSubmit should enqueue a
+HardFlow job, and a daemon/background runner should process route and strict
+research with isolated Codex state.
+
+### Files Changed
+
+- `src/cli.ts`
+- `src/config.ts`
+- `src/hooks/stopValidationGate.ts`
+- `src/hooks/userPromptSubmit.ts`
+- `src/internalEnv.ts`
+- `src/paths.ts`
+- `src/researchOrchestrator.ts`
+- `src/daemon/daemon.ts`
+- `src/daemon/jobRunner.ts`
+- `src/jobs/jobSchema.ts`
+- `src/jobs/jobStore.ts`
+- `src/router/providers/codexCli.ts`
+- `src/router/providers/index.ts`
+- `tests/hookState.test.ts`
+- `tests/jobDaemon.test.ts`
+- `tests/triggerAudit.test.ts`
+- `tests/userPromptSubmit.test.ts`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Summary
+
+- Added persistent job files at `.agent/hardflow/jobs/<runId>.json`.
+- Added daemon/job CLI commands: `daemon run|status|stop` and
+  `jobs list|show|run-once|run-pending`.
+- Refactored `UserPromptSubmit` to enqueue a job only.
+- Refactored `Stop` hook to check job state and avoid long-running route or
+  strict research work.
+- Added isolated Codex home handling for daemon-local Codex CLI/SDK execution.
+- Added router provider abstraction with `codex_cli` default, `codex_sdk`, and
+  `mock`; OpenAI/local providers remain placeholders.
+- Kept existing strict research execution through the SDK runner, without
+  changing coverage policy or concurrency defaults.
+
+### Verification Commands
+
+- `npm run build`: passed.
+- `npm test`: passed, 27 test files and 226 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed.
+
+### Safety Checklist
+
+- [x] Did not implement OpenAI API router.
+- [x] Did not do computed confidence.
+- [x] Did not do hidden validator runner work.
+- [x] Did not run large diagnostics experiments.
+- [x] Did not modify global files.
+- [x] Removed untracked `.agent/hardflow/` runtime output before staging.
+- [x] Updated `ai/context/CURRENT_STATE.md`.
+- [x] Updated `ai/reports/CODEX_REPORT.md`.
+
+### Risks And Follow-Ups
+
+- Daemon lifecycle is intentionally minimal; production supervision or launchd
+  integration can be added later.
+- `codex_cli` provider depends on local `codex exec` availability and trust
+  behavior. Tests use mock providers for deterministic coverage.
+- Future router providers can add `openai_structured_output` or local model
+  routing without changing hook semantics.
+
+### Next ChatGPT Question
+
+Please review the job/daemon automatic trigger architecture using:
+
+- uploaded files, the current `main` diff, and current state files first;
+- `ai/context/CURRENT_STATE.md`;
+- `ai/context/PROJECT_CONTEXT.md`;
+- `ai/context/REVIEW_PROTOCOL.md`;
+- `ai/reports/CODEX_REPORT.md`;
+- old chat memory only as unverified context.
+
+Known anomalies:
+
+- Older entries in current-state/report mention stale branch names from prior
+  handoff work; the current commit target is `main`.
+- Daemon supervision is minimal by design.
+- No global install was run for this change.
+
+Expected output format:
+
+- Review findings first.
+- Then state whether the job/daemon architecture satisfies the intended
+  fail-closed trigger design.
+- Then list missing tests, docs, or operational gaps.
+- Then provide the next Codex-ready prompt.
+
+Next Codex prompt request:
+
+- Please provide the exact next prompt the user should give Codex to address any
+  review findings or proceed with the next implementation step.

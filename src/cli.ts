@@ -8,9 +8,12 @@ import { codexRunnerStatus } from "./codexRunner.js";
 import { globalAgentsMdHasHardflowBlock, installGlobal, SDK_VERSION, type InstallMode } from "./config.js";
 import { evaluateCoverage } from "./coverageEval.js";
 import { parseCsv, parseNumberCsv, runDiagnostics, type DiagnosticsCommand } from "./diagnostics/sdkDiagnostics.js";
+import { daemonStatus, runDaemon, stopDaemon } from "./daemon/daemon.js";
+import { runHardflowJobOnce, runPendingHardflowJobs } from "./daemon/jobRunner.js";
 import { requireExecutorManifest } from "./executionOrchestrator.js";
 import { parseFlagArgs, type ParsedFlags } from "./flagParser.js";
 import { appendHookEvent, assertHookActive, hookStatus } from "./hookEvents.js";
+import { listHardflowJobs, readHardflowJob } from "./jobs/jobStore.js";
 import { cleanWorkspaceStrategy, hasHeadCommit } from "./gitUtils.js";
 import { stopValidationGate } from "./hooks/stopValidationGate.js";
 import { preToolUsePrivatePathGuard } from "./hooks/preToolUsePrivatePathGuard.js";
@@ -630,6 +633,45 @@ async function main(): Promise<void> {
         }
         throw new Error("Usage: codex-hardflow hooks <status|assert-active> [--run-id <runId>]");
       }
+      case "jobs": {
+        const subcommand = args[0];
+        const parsed = parseFlagArgs(args.slice(1));
+        if (subcommand === "list") {
+          printJson({ jobs: listHardflowJobs(cwd) });
+          return;
+        }
+        if (subcommand === "show") {
+          const runId = stringFlag(parsed.flags, "run-id", true) ?? "";
+          printJson(readHardflowJob(cwd, runId));
+          return;
+        }
+        if (subcommand === "run-once") {
+          const runId = stringFlag(parsed.flags, "run-id", true) ?? "";
+          printJson(await runHardflowJobOnce(cwd, runId));
+          return;
+        }
+        if (subcommand === "run-pending") {
+          printJson({ jobs: await runPendingHardflowJobs(cwd) });
+          return;
+        }
+        throw new Error("Usage: codex-hardflow jobs <list|show|run-once|run-pending>");
+      }
+      case "daemon": {
+        const subcommand = args[0];
+        if (subcommand === "status") {
+          printJson(daemonStatus(cwd));
+          return;
+        }
+        if (subcommand === "stop") {
+          printJson(stopDaemon(cwd));
+          return;
+        }
+        if (subcommand === "run") {
+          printJson(await runDaemon(cwd));
+          return;
+        }
+        throw new Error("Usage: codex-hardflow daemon <run|status|stop>");
+      }
       case "eval": {
         const subcommand = args[0];
         const parsed = parseFlagArgs(args.slice(1));
@@ -778,6 +820,13 @@ async function main(): Promise<void> {
             "codex-hardflow report assert-evidence",
             "codex-hardflow hooks status [--run-id <runId>]",
             "codex-hardflow hooks assert-active --run-id <runId>",
+            "codex-hardflow daemon run",
+            "codex-hardflow daemon status",
+            "codex-hardflow daemon stop",
+            "codex-hardflow jobs list",
+            "codex-hardflow jobs show --run-id <runId>",
+            "codex-hardflow jobs run-once --run-id <runId>",
+            "codex-hardflow jobs run-pending",
             "codex-hardflow eval coverage [--run-id <runId>|--latest-evidence-run] [--include-test-runs] [--baseline-run-id <runId>]",
             "codex-hardflow diagnostics sdk-concurrency [--dry-run|--execute --real-sdk] [--output <path>]",
             "codex-hardflow diagnostics sdk-prompt-width [--dry-run|--execute --real-sdk] [--output <path>]",

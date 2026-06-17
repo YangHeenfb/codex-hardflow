@@ -44,8 +44,18 @@ import type {
   CoverageMode,
   ParallelPolicy
 } from "./schemas.js";
-import { currentResearchReportPath, researchRunMetadataPath, researchRunReportPath, researchRunRouterTracePath, researchRunSubagentsDir, researchSubagentReportPath } from "./paths.js";
+import {
+  currentResearchReportPath,
+  researchRunCoveragePlanPath,
+  researchRunEvidenceLedgerPath,
+  researchRunMetadataPath,
+  researchRunReportPath,
+  researchRunRouterTracePath,
+  researchRunSubagentsDir,
+  researchSubagentReportPath
+} from "./paths.js";
 import { createHookMarker, hashText, resolveLatestActiveMarker } from "./hookState.js";
+import { completeHardflowJob, createHardflowJob, readHardflowJob } from "./jobs/jobStore.js";
 
 export interface BuildResearchReportOptions {
   rawUserPrompt?: string;
@@ -855,7 +865,26 @@ function writeParentResearchReport(cwd: string, report: ResearchReport, updateCu
     writeFileSync(currentTarget, `${JSON.stringify(report, null, 2)}\n`);
   }
   writeRunMetadata(cwd, report);
+  completeExistingJobForReport(cwd, report);
   return report;
+}
+
+function completeExistingJobForReport(cwd: string, report: ResearchReport): void {
+  const job = readHardflowJob(cwd, report.runId);
+  if (!job || job.status === "cancelled") return;
+  const routerOutput = report.source_matrix?.routerOutput;
+  const route =
+    typeof routerOutput === "object" && routerOutput !== null && "route" in routerOutput && typeof (routerOutput as { route?: unknown }).route === "string"
+      ? ((routerOutput as { route: RouterOutput["route"] }).route)
+      : "research";
+  completeHardflowJob(cwd, report.runId, {
+    route,
+    routerTracePath: researchRunRouterTracePath(cwd, report.runId),
+    researchReportPath: researchRunReportPath(cwd, report.runId),
+    coveragePlanPath: researchRunCoveragePlanPath(cwd, report.runId),
+    evidenceLedgerPath: researchRunEvidenceLedgerPath(cwd, report.runId),
+    threadIds: report.sdk_worker_runs?.map((run) => run.threadId).filter((threadId) => threadId.length > 0) ?? job.threadIds ?? []
+  });
 }
 
 export async function runResearch(task: string, cwd: string, options: RunResearchOptions = {}): Promise<ResearchReport> {
@@ -887,6 +916,16 @@ export async function runResearch(task: string, cwd: string, options: RunResearc
     triggerSource,
     programmaticTrigger
   });
+  if (options.owner !== "subagent" && !readHardflowJob(cwd, marker.runId)) {
+    createHardflowJob({
+      runId: marker.runId,
+      cwd,
+      rawUserPrompt: parts.rawUserPrompt,
+      promptHash: marker.promptHash,
+      turnId: marker.turnId,
+      triggerSource: triggerSource === "hook_user_prompt_submit" ? "hook_user_prompt_submit" : "cli"
+    });
+  }
   let routerOutput = options.routerOutput;
   let routerTraceWritten = false;
   let routerTraceReused = false;

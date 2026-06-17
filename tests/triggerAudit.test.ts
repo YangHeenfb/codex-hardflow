@@ -12,6 +12,7 @@ import { addManualSourceToReport, addSubagentReport, buildResearchReport, mergeS
 import { buildRouterTrace, writeRouterTrace } from "../src/router/routerTrace.js";
 import { broadResearchRouterOutput } from "./routerFixtures.js";
 import { fakeRouteRunner } from "./hookTestUtils.js";
+import { completeHardflowJob, createHardflowJob } from "../src/jobs/jobStore.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-trigger-audit-"));
@@ -101,6 +102,20 @@ describe("programmatic trigger audit", () => {
       input: { turnId: "turn-false-hardflow-claim" }
     });
     writeRouterTrace(cwd, buildRouterTrace({ rawUserPrompt: prompt, currentRunId: marker.runId, triggerSource: "hook_user_prompt_submit", programmaticTrigger: true }, broadResearchRouterOutput, "llm", undefined, marker.turnId));
+    createHardflowJob({
+      runId: marker.runId,
+      cwd,
+      rawUserPrompt: prompt,
+      promptHash: marker.promptHash,
+      turnId: marker.turnId,
+      triggerSource: "hook_user_prompt_submit"
+    });
+    completeHardflowJob(cwd, marker.runId, {
+      route: "research",
+      routerTracePath: "",
+      researchReportPath: researchRunReportPath(cwd, marker.runId),
+      threadIds: []
+    });
     const report = buildResearchReport(prompt, [], "not_configured", {
       runId: marker.runId,
       turnId: marker.turnId,

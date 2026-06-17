@@ -5,27 +5,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readHookEvents } from "../src/hookEvents.js";
 import { markerPathFor } from "../src/hookState.js";
 import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
-import { repoHash, researchRunHookInputPath, researchRunRouterTracePath } from "../src/paths.js";
-import type { RouterOutput } from "../src/router/routerSchema.js";
-import { failingRouteRunner, fakeRouteRunner } from "./hookTestUtils.js";
-import { currentProjectCompetitorRouterOutput, routerOutputForBuckets } from "./routerFixtures.js";
+import { readHardflowJob } from "../src/jobs/jobStore.js";
+import { hardflowJobPath, repoHash, researchRunHookInputPath, researchRunRouterTracePath } from "../src/paths.js";
 
 function additionalContext(result: Record<string, unknown>): string {
   return String((result.hookSpecificOutput as Record<string, unknown> | undefined)?.additionalContext ?? "");
 }
 
-function directOutput(): RouterOutput {
-  return routerOutputForBuckets([], {
-    route: "direct_answer",
-    workflowPattern: "direct",
-    researchProfile: "none",
-    requiresSourceMatrix: false,
-    reasons: ["Direct answer."],
-    risks: []
-  });
-}
-
-describe("UserPromptSubmit router preflight injection", () => {
+describe("UserPromptSubmit job enqueue", () => {
   function clearInternalEnv(): void {
     delete process.env.CODEX_HARDFLOW_INTERNAL;
     delete process.env.CODEX_HARDFLOW_INTERNAL_PURPOSE;
@@ -39,7 +26,8 @@ describe("UserPromptSubmit router preflight injection", () => {
   });
   afterEach(clearInternalEnv);
 
-  it("injects router preflight without top-level additionalContext", () => {
+  it("queues a HardFlow job without running router preflight", () => {
+    let routeCalls = 0;
     const result = userPromptSubmit(
       {
         cwd: process.cwd(),
@@ -47,24 +35,32 @@ describe("UserPromptSubmit router preflight injection", () => {
         turnId: "turn-userprompt-research"
       },
       process.cwd(),
-      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "github", "codex_default_discovery"])) }
+      {
+        routeRunner: () => {
+          routeCalls += 1;
+          throw new Error("route runner should not be called from UserPromptSubmit");
+        }
+      }
     );
+    const job = readHardflowJob(process.cwd(), "run-turn-userprompt-research");
 
     expect(result.decision).toBe("allow");
     expect((result.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
     expect(result).not.toHaveProperty("additionalContext");
-    expect(additionalContext(result)).toContain("router preflight");
+    expect(routeCalls).toBe(0);
+    expect(job?.status).toBe("pending");
+    expect(job?.routerProvider).toBe("codex_cli");
+    expect(job?.workerProvider).toBe("codex_sdk");
+    expect(job?.coverageMode).toBe("exhaustive");
+    expect(job?.parallelPolicy).toBe("all_required");
+    expect(additionalContext(result)).toContain("queued a HardFlow job");
     expect(additionalContext(result)).toContain("router_trace");
-    expect(additionalContext(result)).toContain("not by keyword matching");
     expect(additionalContext(result)).toContain("official_docs_researcher");
     expect(additionalContext(result)).toContain("codex_default_researcher");
-    expect(additionalContext(result)).toContain("routeStatus=routed");
-    expect(additionalContext(result)).toContain("route=research");
-    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).toContain("jobs run-once --run-id run-turn-userprompt-research");
+    expect(additionalContext(result)).toContain("daemon run");
     expect(additionalContext(result)).toContain("--input-json");
     expect(additionalContext(result)).not.toContain("--raw-user-prompt");
-    expect(additionalContext(result)).toContain("strict_programmatic/sdk_threads only");
-    expect(additionalContext(result)).toContain("ResearchRequest CLI examples");
     expect(additionalContext(result)).not.toContain("research --runner app_handoff");
     expect(additionalContext(result)).toContain("--run-id");
     expect(additionalContext(result)).toContain("runs/");
@@ -73,7 +69,7 @@ describe("UserPromptSubmit router preflight injection", () => {
     expect(additionalContext(result)).not.toContain("npx tsx src/cli.ts");
   });
 
-  it("runs route directly, writes router_trace, and marks the marker routed", () => {
+  it("writes marker, hook_input, and job but no router_trace", () => {
     const cwd = mkdtempSync(join(tmpdir(), "hardflow-userprompt-route-"));
     userPromptSubmit(
       {
@@ -81,16 +77,16 @@ describe("UserPromptSubmit router preflight injection", () => {
         prompt: "What are current practical solutions for agent memory?",
         turnId: "turn-direct-route"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "github"])) }
+      process.cwd()
     );
     const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-direct-route"), "utf8")) as Record<string, unknown>;
+    const job = readHardflowJob(cwd, String(marker.runId));
 
-    expect(marker.routeStatus).toBe("routed");
-    expect(marker.routerPreflightSource).toBe("user_prompt_submit");
-    expect(marker.routerPreflightSucceeded).toBe(true);
-    expect(marker.routerRoute).toBe("research");
-    expect(existsSync(researchRunRouterTracePath(cwd, String(marker.runId)))).toBe(true);
+    expect(marker.routeStatus).toBe("router_required");
+    expect(job?.status).toBe("pending");
+    expect(job?.triggerSource).toBe("hook_user_prompt_submit");
+    expect(existsSync(hardflowJobPath(cwd, String(marker.runId)))).toBe(true);
+    expect(existsSync(researchRunRouterTracePath(cwd, String(marker.runId)))).toBe(false);
     expect(existsSync(researchRunHookInputPath(cwd, String(marker.runId)))).toBe(true);
   });
 
@@ -107,8 +103,7 @@ describe("UserPromptSubmit router preflight injection", () => {
         prompt: "You are the codex-hardflow structured task router. Return JSON only.",
         turnId: "turn-internal-router"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs"])) }
+      process.cwd()
     );
 
     expect(result.decision).toBe("allow");
@@ -127,19 +122,20 @@ describe("UserPromptSubmit router preflight injection", () => {
         prompt: longPrompt,
         turnId: "turn-long-prompt"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "github"])) }
+      process.cwd()
     );
     const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-long-prompt"), "utf8")) as Record<string, unknown>;
     const input = JSON.parse(readFileSync(researchRunHookInputPath(cwd, String(marker.runId)), "utf8")) as Record<string, unknown>;
+    const job = readHardflowJob(cwd, String(marker.runId));
 
     expect(input.rawUserPrompt).toBe(longPrompt);
+    expect(job?.rawUserPrompt).toBe(longPrompt);
     expect(additionalContext(result)).toContain("--input-json");
     expect(additionalContext(result)).not.toContain(longPrompt.slice(0, 1000));
     expect(additionalContext(result).length).toBeLessThan(20_000);
   });
 
-  it("routes programmatically without AGENTS.md or skill guidance", () => {
+  it("queues programmatically without AGENTS.md or skill guidance", () => {
     const cwd = mkdtempSync(join(tmpdir(), "hardflow-userprompt-no-agents-"));
     const result = userPromptSubmit(
       {
@@ -147,22 +143,24 @@ describe("UserPromptSubmit router preflight injection", () => {
         prompt: "What are current practical solutions for agent memory?",
         turnId: "turn-no-agents-or-skill"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "github", "community"])) }
+      process.cwd()
     );
     const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-no-agents-or-skill"), "utf8")) as Record<string, unknown>;
+    const job = readHardflowJob(cwd, String(marker.runId));
 
     expect(existsSync(join(cwd, "AGENTS.md"))).toBe(false);
     expect(result.decision).toBe("allow");
     expect(marker.triggerSource).toBe("hook_user_prompt_submit");
     expect(marker.programmaticTrigger).toBe(true);
-    expect(marker.routeStatus).toBe("routed");
-    expect(existsSync(researchRunRouterTracePath(cwd, String(marker.runId)))).toBe(true);
-    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(marker.routeStatus).toBe("router_required");
+    expect(job?.status).toBe("pending");
+    expect(existsSync(researchRunRouterTracePath(cwd, String(marker.runId)))).toBe(false);
+    expect(additionalContext(result)).toContain("HardFlow job path");
   });
 
-  it("marks router_failed when direct route preflight fails", () => {
+  it("does not mark router_failed from UserPromptSubmit because route runs in daemon", () => {
     const cwd = mkdtempSync(join(tmpdir(), "hardflow-userprompt-route-fail-"));
+    let routeCalls = 0;
     const result = userPromptSubmit(
       {
         cwd,
@@ -170,78 +168,77 @@ describe("UserPromptSubmit router preflight injection", () => {
         turnId: "turn-direct-route-failed"
       },
       process.cwd(),
-      { routeRunner: failingRouteRunner("router timed out") }
+      {
+        routeRunner: () => {
+          routeCalls += 1;
+          throw new Error("not called");
+        }
+      }
     );
     const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-direct-route-failed"), "utf8")) as Record<string, unknown>;
 
-    expect(marker.routeStatus).toBe("router_failed");
-    expect(marker.routerPreflightSucceeded).toBe(false);
-    expect(marker.routerPreflightFailureReason).toBe("router timed out");
-    expect(additionalContext(result)).toContain("Router preflight failed");
+    expect(routeCalls).toBe(0);
+    expect(marker.routeStatus).toBe("router_required");
+    expect(additionalContext(result)).toContain("queued a HardFlow job");
   });
 
-  it("injects local_repo and competitor researchers for current-project comparison prompts", () => {
+  it("includes local_repo and competitor researcher names in queued-job context", () => {
     const result = userPromptSubmit(
       {
         cwd: process.cwd(),
         prompt: "我现在这个项目做的multi agent结构有什么类似的产品或者项目？有哪些我可以吸收改进的？",
         turnId: "turn-userprompt-local-competitors"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(currentProjectCompetitorRouterOutput) }
+      process.cwd()
     );
 
     expect(additionalContext(result)).toContain("local_repo_researcher");
     expect(additionalContext(result)).toContain("competitor_researcher");
-    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).toContain("jobs run-once");
     expect(additionalContext(result)).toContain("Ordinary web_search output");
     expect(additionalContext(result)).not.toContain("App interactive research should use app_handoff by default");
     expect(additionalContext(result)).not.toContain("Do not synchronously launch SDK researcher threads unless explicitly requested");
   });
 
-  it("injects strict research command for agentic long horizon work prompts", () => {
+  it("injects job command for agentic long horizon work prompts", () => {
     const result = userPromptSubmit(
       {
         cwd: process.cwd(),
         prompt: "What are current practical solutions for agentic long horizon work? 中文回答",
         turnId: "turn-agentic-long-horizon"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "academic", "codex_default_discovery"])) }
+      process.cwd()
     );
 
-    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
-    expect(additionalContext(result)).toContain("--parallel-policy all_required");
+    expect(additionalContext(result)).toContain("jobs run-once --run-id run-turn-agentic-long-horizon");
+    expect(additionalContext(result)).toContain("daemon run");
     expect(additionalContext(result)).not.toContain("research --runner app_handoff");
     expect(additionalContext(result)).not.toContain("SDK researcher threads unless explicitly requested");
   });
 
-  it("injects strict research command for hidden validation solution prompts", () => {
+  it("injects job command for hidden validation solution prompts", () => {
     const result = userPromptSubmit(
       {
         cwd: process.cwd(),
         prompt: "Find current practical hidden validation solutions for AI coding agents",
         turnId: "turn-hidden-validation-solutions"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(routerOutputForBuckets(["official_docs", "security", "academic", "codex_default_discovery"])) }
+      process.cwd()
     );
 
-    expect(additionalContext(result)).toContain("research --strict-programmatic --coverage-mode exhaustive --parallel-policy all_required");
+    expect(additionalContext(result)).toContain("jobs run-once --run-id run-turn-hidden-validation-solutions");
     expect(additionalContext(result)).not.toContain("app_handoff by default");
   });
 
-  it("does not overblock simple or bypassed prompts", () => {
-    const simple = userPromptSubmit({ prompt: "translate hello to Chinese" }, process.cwd(), { routeRunner: fakeRouteRunner(directOutput()) });
+  it("queues even simple prompts for daemon routing without blocking in UserPromptSubmit", () => {
+    const simple = userPromptSubmit({ prompt: "translate hello to Chinese" }, process.cwd());
     expect(simple.decision).toBe("allow");
     expect((simple.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
-    expect(additionalContext(simple)).toContain("router preflight");
-    expect(additionalContext(simple)).toContain("route=direct_answer");
+    expect(additionalContext(simple)).toContain("queued a HardFlow job");
     expect(additionalContext(simple)).not.toContain("research --runner app_handoff");
-    const bypass = userPromptSubmit({ prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd(), { routeRunner: fakeRouteRunner(directOutput()) });
+    const bypass = userPromptSubmit({ prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd());
     expect(bypass.decision).toBe("allow");
-    expect(additionalContext(bypass)).toContain("route=direct_answer");
-    expect(additionalContext(bypass)).toContain("do not use keyword fallback");
+    expect(additionalContext(bypass)).toContain("jobs run-once --run-id run-turn-bypass");
   });
 
   it("keeps developer entrypoint warnings out of normal App instructions", () => {
@@ -251,12 +248,11 @@ describe("UserPromptSubmit router preflight injection", () => {
         prompt: "修复 codex-hardflow developer maintenance，明确需要检查 tsx dev entrypoint",
         turnId: "turn-maintenance-dev-entrypoint"
       },
-      process.cwd(),
-      { routeRunner: fakeRouteRunner(directOutput()) }
+      process.cwd()
     );
 
     expect(result.decision).toBe("allow");
-    expect(additionalContext(result)).toContain("router preflight");
+    expect(additionalContext(result)).toContain("queued a HardFlow job");
     expect(additionalContext(result)).not.toContain("npx tsx src/cli.ts");
   });
 });

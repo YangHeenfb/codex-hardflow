@@ -3,6 +3,7 @@ import { tmpdir, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { LoopConfig } from "./schemas.js";
+import type { HardflowRouterProvider, HardflowWorkerProvider } from "./jobs/jobSchema.js";
 import { installShellWrapper } from "./cliPaths.js";
 import { codexHome, hardflowHome, hardflowStateDir, privateStoreRoot, skillPathStrategy } from "./paths.js";
 
@@ -23,15 +24,45 @@ export interface TriggerRuntimeConfig {
   autoRunStrictResearchInStop: boolean;
   strictResearchStopTimeoutMs: number;
   allowQuickAnswerBypass: boolean;
+  userPromptSubmitMode: "enqueue_job" | "direct_route";
 }
 
 export const DEFAULT_TRIGGER_RUNTIME_CONFIG: TriggerRuntimeConfig = {
-  autoRouteOnUserPromptSubmit: true,
+  autoRouteOnUserPromptSubmit: false,
   routePreflightTimeoutMs: 45_000,
-  stopAutoRouteFallback: true,
-  autoRunStrictResearchInStop: true,
+  stopAutoRouteFallback: false,
+  autoRunStrictResearchInStop: false,
   strictResearchStopTimeoutMs: 1_800_000,
-  allowQuickAnswerBypass: true
+  allowQuickAnswerBypass: true,
+  userPromptSubmitMode: "enqueue_job"
+};
+
+export interface DaemonRuntimeConfig {
+  enabled: boolean;
+  pollIntervalMs: number;
+  maxConcurrentJobs: number;
+}
+
+export interface RouterRuntimeConfig {
+  provider: HardflowRouterProvider;
+}
+
+export interface WorkerRuntimeConfig {
+  provider: HardflowWorkerProvider;
+}
+
+export const DEFAULT_DAEMON_RUNTIME_CONFIG: DaemonRuntimeConfig = {
+  enabled: true,
+  pollIntervalMs: 1_000,
+  maxConcurrentJobs: 1
+};
+
+export const DEFAULT_ROUTER_RUNTIME_CONFIG: RouterRuntimeConfig = {
+  provider: "codex_cli"
+};
+
+export const DEFAULT_WORKER_RUNTIME_CONFIG: WorkerRuntimeConfig = {
+  provider: "codex_sdk"
 };
 
 export function timestamp(): string {
