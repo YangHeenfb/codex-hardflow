@@ -18,7 +18,10 @@ const BOOLEAN_FLAGS = new Set([
   "with-skill",
   "with-app-agents",
   "with-agents-docs",
-  "stdin-json"
+  "stdin-json",
+  "async",
+  "show-progress",
+  "no-progress"
 ]);
 
 const STRING_FLAGS = new Set([
@@ -93,7 +96,11 @@ const STRING_FLAGS = new Set([
   "query",
   "failure-reason",
   "started-at",
-  "ended-at"
+  "ended-at",
+  "from-run",
+  "timeout-ms",
+  "router-provider",
+  "worker-provider"
 ]);
 
 function parseBooleanFlagValue(key: string, value: string): boolean {

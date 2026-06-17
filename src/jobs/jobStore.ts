@@ -64,8 +64,8 @@ export function createHardflowJob(input: CreateHardflowJobInput): HardflowJob {
     routerProvider: input.routerProvider ?? "codex_cli",
     workerProvider: input.workerProvider ?? "codex_sdk",
     strict: true,
-    coverageMode: "exhaustive",
-    parallelPolicy: "all_required",
+    coverageMode: input.coverageMode ?? "exhaustive",
+    parallelPolicy: input.parallelPolicy ?? "all_required",
     threadIds: [],
     internalHookBypass: true
   };

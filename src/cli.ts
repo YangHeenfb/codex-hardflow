@@ -1,10 +1,11 @@
 import { createRequire } from "node:module";
-import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
+import { runAsk, type AskResult } from "./ask/askRunner.js";
 import { cliPathStatus } from "./cliPaths.js";
 import { codexRunnerStatus } from "./codexRunner.js";
 import { globalAgentsMdHasHardflowBlock, installGlobal, SDK_VERSION, type InstallMode } from "./config.js";
@@ -15,7 +16,8 @@ import { runHardflowJobOnce, runPendingHardflowJobs } from "./daemon/jobRunner.j
 import { requireExecutorManifest } from "./executionOrchestrator.js";
 import { parseFlagArgs, type ParsedFlags } from "./flagParser.js";
 import { appendHookEvent, assertHookActive, hookStatus } from "./hookEvents.js";
-import { createHardflowJob, listHardflowJobs, readHardflowJob } from "./jobs/jobStore.js";
+import { listHardflowJobs, readHardflowJob } from "./jobs/jobStore.js";
+import type { HardflowRouterProvider, HardflowWorkerProvider } from "./jobs/jobSchema.js";
 import { cleanWorkspaceStrategy, hasHeadCommit } from "./gitUtils.js";
 import { stopValidationGate } from "./hooks/stopValidationGate.js";
 import { preToolUsePrivatePathGuard } from "./hooks/preToolUsePrivatePathGuard.js";
@@ -23,7 +25,7 @@ import { subagentStartContext } from "./hooks/subagentStartContext.js";
 import { subagentStopLoopGate } from "./hooks/subagentStopLoopGate.js";
 import { userPromptSubmit } from "./hooks/userPromptSubmit.js";
 import { planParallelModules } from "./parallelOrchestrator.js";
-import { codexHome, privateStoreRoot, researchRunEvidenceLedgerPath, researchRunReportPath, skillPathStrategy, validationSummaryPath } from "./paths.js";
+import { codexHome, privateStoreRoot, skillPathStrategy, validationSummaryPath } from "./paths.js";
 import { runLogprobsProbe } from "./probes/logprobsProbe.js";
 import {
   addManualSourceToReport,
@@ -116,6 +118,60 @@ function parallelPolicyFlag(value: string | undefined): ParallelPolicy | undefin
   if (value === undefined) return undefined;
   if (value === "all_required" || value === "fixed" || value === "adaptive" || value === "wave") return value;
   throw new Error(`Invalid --parallel-policy: ${value}`);
+}
+
+function askParallelPolicyFlag(value: string | undefined): ParallelPolicy | undefined {
+  if (value === "conservative") return "fixed";
+  return parallelPolicyFlag(value);
+}
+
+function routerProviderFlag(value: string | undefined): HardflowRouterProvider | undefined {
+  if (value === undefined) return undefined;
+  if (value === "codex_cli" || value === "codex_sdk" || value === "openai_structured_output" || value === "local_model" || value === "mock") return value;
+  throw new Error(`Invalid --router-provider: ${value}`);
+}
+
+function workerProviderFlag(value: string | undefined): HardflowWorkerProvider | undefined {
+  if (value === undefined) return undefined;
+  if (value === "codex_sdk" || value === "codex_cli" || value === "source_adapters" || value === "mock") return value;
+  throw new Error(`Invalid --worker-provider: ${value}`);
+}
+
+function printAskText(result: AskResult): void {
+  const lines = [
+    `runId: ${result.runId}`,
+    `status: ${result.status}`,
+    `route: ${result.route ?? "unknown"}`,
+    "",
+    result.answer
+  ];
+  if (result.coverageSummary) {
+    lines.push(
+      "",
+      "Coverage summary:",
+      `- coverageMode: ${result.coverageSummary.coverageMode ?? "unknown"}`,
+      `- parallelPolicy: ${result.coverageSummary.parallelPolicy ?? "unknown"}`,
+      `- requiredBuckets: ${result.coverageSummary.completedRequiredBucketCount}/${result.coverageSummary.requiredBucketCount}`,
+      `- searchedButNoSignalCount: ${result.coverageSummary.searchedButNoSignalCount}`,
+      `- sourceCount: ${result.coverageSummary.sourceCount}`,
+      `- evidenceItemCount: ${result.coverageSummary.evidenceItemCount}`,
+      `- coverageScore: ${result.coverageSummary.coverageScore ?? "n/a"}`
+    );
+  }
+  if (result.sourceSummary.length > 0) {
+    lines.push("", "Source summary:", ...result.sourceSummary.slice(0, 8).map((source) => `- [${source.id}] ${source.title} (${source.bucket}) ${source.urlOrRef}`));
+  }
+  if (result.caveats.length > 0) {
+    lines.push("", "Caveats:", ...result.caveats.map((caveat) => `- ${caveat}`));
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
+function askShouldExitNonzero(result: AskResult): boolean {
+  if (result.async) return false;
+  if (result.status === "failed" || result.status === "cancelled") return true;
+  if (result.failureReason) return true;
+  return result.status !== "completed";
 }
 
 function requestedByFlag(value: string | undefined): ResearchRequestRequestedBy {
@@ -345,30 +401,30 @@ async function main(): Promise<void> {
         const inputJson = await readCommandInputJson(parsed.flags);
         const taskArg = parsed.rest.join(" ");
         const rawUserPrompt = stringFlag(parsed.flags, "raw-user-prompt") ?? stringField(inputJson, ["rawUserPrompt", "raw_user_prompt", "prompt", "message"]) ?? taskArg;
-        if (!rawUserPrompt) throw new Error("Usage: codex-hardflow ask [--run-id <runId>] [--input-json <path>] \"task...\"");
-        const runId = stringFlag(parsed.flags, "run-id") ?? stringField(inputJson, ["runId", "run_id"]) ?? `run-ask-${randomUUID()}`;
-        const job = createHardflowJob({
-          runId,
+        const fromRunId = stringFlag(parsed.flags, "from-run") ?? stringField(inputJson, ["fromRun", "from_run", "fromRunId", "from_run_id"]);
+        if (!rawUserPrompt && !fromRunId) {
+          throw new Error("Usage: codex-hardflow ask [--json] [--async] [--from-run <runId>] [--run-id <runId>] [--input-json <path>] \"question...\"");
+        }
+        const json = booleanFlag(parsed.flags, "json");
+        const showProgress = booleanFlag(parsed.flags, "show-progress") || (!json && !booleanFlag(parsed.flags, "no-progress") && !booleanFlag(parsed.flags, "async"));
+        const result = await runAsk({
           cwd,
           rawUserPrompt,
-          promptHash: "",
-          turnId: stringField(inputJson, ["turnId", "turn_id"]) ?? runId,
-          triggerSource: "cli"
+          fromRunId,
+          runId: stringFlag(parsed.flags, "run-id") ?? stringField(inputJson, ["runId", "run_id"]),
+          async: booleanFlag(parsed.flags, "async"),
+          timeoutMs: numberFlag(parsed.flags, "timeout-ms"),
+          coverageMode: coverageModeFlag(stringFlag(parsed.flags, "coverage-mode")) ?? "exhaustive",
+          parallelPolicy: askParallelPolicyFlag(stringFlag(parsed.flags, "parallel-policy")) ?? "all_required",
+          routerProvider: routerProviderFlag(stringFlag(parsed.flags, "router-provider")) ?? "codex_cli",
+          workerProvider: workerProviderFlag(stringFlag(parsed.flags, "worker-provider")) ?? "codex_sdk",
+          maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
+          showProgress,
+          progressWriter: (message) => process.stderr.write(`${message}\n`)
         });
-        const completed = await runHardflowJobOnce(cwd, job.runId);
-        const reportPath = researchRunReportPath(cwd, completed.runId);
-        const evidenceLedgerPath = researchRunEvidenceLedgerPath(cwd, completed.runId);
-        printJson({
-          runId: completed.runId,
-          status: completed.status,
-          route: completed.route,
-          failureReason: completed.failureReason,
-          answerSource: completed.route === "research" && completed.status === "completed" ? "run_owned_research_report_and_evidence_ledger" : "router_result",
-          researchReportPath: existsSync(reportPath) ? reportPath : completed.researchReportPath,
-          evidenceLedgerPath: existsSync(evidenceLedgerPath) ? evidenceLedgerPath : completed.evidenceLedgerPath,
-          noOrdinaryWebFallback: true
-        });
-        if (completed.status === "failed" || completed.status === "cancelled") process.exitCode = 1;
+        if (json) printJson(result);
+        else printAskText(result);
+        if (askShouldExitNonzero(result)) process.exitCode = 1;
         return;
       }
       case "route": {
@@ -679,6 +735,26 @@ async function main(): Promise<void> {
           printJson(readHardflowJob(cwd, runId));
           return;
         }
+        if (subcommand === "wait") {
+          const runId = stringFlag(parsed.flags, "run-id", true) ?? "";
+          const timeoutMs = numberFlag(parsed.flags, "timeout-ms") ?? 0;
+          const started = Date.now();
+          while (true) {
+            const job = readHardflowJob(cwd, runId);
+            if (!job) throw new Error(`HardFlow job not found: ${runId}`);
+            if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+              printJson(job);
+              if (job.status !== "completed") process.exitCode = 1;
+              return;
+            }
+            if (timeoutMs > 0 && Date.now() - started >= timeoutMs) {
+              printJson(job);
+              process.exitCode = 124;
+              return;
+            }
+            await delay(1000);
+          }
+        }
         if (subcommand === "run-once") {
           const runId = stringFlag(parsed.flags, "run-id", true) ?? "";
           printJson(await runHardflowJobOnce(cwd, runId));
@@ -688,7 +764,7 @@ async function main(): Promise<void> {
           printJson({ jobs: await runPendingHardflowJobs(cwd) });
           return;
         }
-        throw new Error("Usage: codex-hardflow jobs <list|show|status|run-once|run-pending>");
+        throw new Error("Usage: codex-hardflow jobs <list|show|status|wait|run-once|run-pending>");
       }
       case "daemon": {
         const subcommand = args[0];
@@ -832,7 +908,7 @@ async function main(): Promise<void> {
         printJson({
           usage: [
             "codex-hardflow status",
-            "codex-hardflow ask [--run-id <runId>] \"task...\"",
+            "codex-hardflow ask [--json] [--async] [--from-run <runId>] [--run-id <runId>] [--timeout-ms <ms>] [--coverage-mode exhaustive|balanced|fast] [--parallel-policy all_required|adaptive|conservative] [--router-provider codex_cli|codex_sdk|mock|openai_structured_output] [--worker-provider codex_sdk|codex_cli|source_adapters|mock] [--max-sources-per-worker <n>] [--show-progress|--no-progress] \"question...\"",
             "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
             "codex-hardflow research --run-id <runId> \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",
@@ -861,6 +937,7 @@ async function main(): Promise<void> {
             "codex-hardflow jobs list",
             "codex-hardflow jobs show --run-id <runId>",
             "codex-hardflow jobs status --run-id <runId>",
+            "codex-hardflow jobs wait --run-id <runId> [--timeout-ms <ms>]",
             "codex-hardflow jobs run-once --run-id <runId>",
             "codex-hardflow jobs run-pending",
             "codex-hardflow eval coverage [--run-id <runId>|--latest-evidence-run] [--include-test-runs] [--baseline-run-id <runId>]",

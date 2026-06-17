@@ -54,6 +54,8 @@ export interface CreateHardflowJobInput {
   triggerSource: HardflowJobTriggerSource;
   routerProvider?: HardflowRouterProvider;
   workerProvider?: HardflowWorkerProvider;
+  coverageMode?: CoverageMode;
+  parallelPolicy?: ParallelPolicy;
   priority?: HardflowJobPriority;
   foreground?: boolean;
   currentUserTurn?: boolean;
@@ -108,8 +110,11 @@ export function normalizeHardflowJob(value: unknown): HardflowJob | null {
     routerProvider: object.routerProvider ?? "codex_cli",
     workerProvider: object.workerProvider ?? "codex_sdk",
     strict: true,
-    coverageMode: object.coverageMode ?? "exhaustive",
-    parallelPolicy: object.parallelPolicy ?? "all_required",
+    coverageMode: object.coverageMode === "balanced" || object.coverageMode === "fast" ? object.coverageMode : "exhaustive",
+    parallelPolicy:
+      object.parallelPolicy === "fixed" || object.parallelPolicy === "adaptive" || object.parallelPolicy === "wave" || object.parallelPolicy === "all_required"
+        ? object.parallelPolicy
+        : "all_required",
     isolatedCodexHome: object.isolatedCodexHome,
     threadIds: Array.isArray(object.threadIds) ? object.threadIds.filter((item): item is string => typeof item === "string") : undefined,
     internalHookBypass: object.internalHookBypass,
