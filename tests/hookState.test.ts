@@ -145,7 +145,8 @@ describe("hook marker Stop gate", () => {
       process.cwd()
     );
 
-    expect(result.decision).toBe("allow");
+    expect(result.decision).toBe("block");
+    expect(String(result.reason)).toContain("HardFlow strict research queued");
     const context = String((result.hookSpecificOutput as Record<string, unknown>).additionalContext);
     expect((result.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
     expect(context).toContain("router_trace");

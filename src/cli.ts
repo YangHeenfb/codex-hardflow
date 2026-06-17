@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
@@ -14,7 +15,7 @@ import { runHardflowJobOnce, runPendingHardflowJobs } from "./daemon/jobRunner.j
 import { requireExecutorManifest } from "./executionOrchestrator.js";
 import { parseFlagArgs, type ParsedFlags } from "./flagParser.js";
 import { appendHookEvent, assertHookActive, hookStatus } from "./hookEvents.js";
-import { listHardflowJobs, readHardflowJob } from "./jobs/jobStore.js";
+import { createHardflowJob, listHardflowJobs, readHardflowJob } from "./jobs/jobStore.js";
 import { cleanWorkspaceStrategy, hasHeadCommit } from "./gitUtils.js";
 import { stopValidationGate } from "./hooks/stopValidationGate.js";
 import { preToolUsePrivatePathGuard } from "./hooks/preToolUsePrivatePathGuard.js";
@@ -22,7 +23,7 @@ import { subagentStartContext } from "./hooks/subagentStartContext.js";
 import { subagentStopLoopGate } from "./hooks/subagentStopLoopGate.js";
 import { userPromptSubmit } from "./hooks/userPromptSubmit.js";
 import { planParallelModules } from "./parallelOrchestrator.js";
-import { codexHome, privateStoreRoot, skillPathStrategy, validationSummaryPath } from "./paths.js";
+import { codexHome, privateStoreRoot, researchRunEvidenceLedgerPath, researchRunReportPath, skillPathStrategy, validationSummaryPath } from "./paths.js";
 import { runLogprobsProbe } from "./probes/logprobsProbe.js";
 import {
   addManualSourceToReport,
@@ -339,6 +340,37 @@ async function main(): Promise<void> {
       case "status":
         printJson(status(cwd));
         return;
+      case "ask": {
+        const parsed = parseFlagArgs(args);
+        const inputJson = await readCommandInputJson(parsed.flags);
+        const taskArg = parsed.rest.join(" ");
+        const rawUserPrompt = stringFlag(parsed.flags, "raw-user-prompt") ?? stringField(inputJson, ["rawUserPrompt", "raw_user_prompt", "prompt", "message"]) ?? taskArg;
+        if (!rawUserPrompt) throw new Error("Usage: codex-hardflow ask [--run-id <runId>] [--input-json <path>] \"task...\"");
+        const runId = stringFlag(parsed.flags, "run-id") ?? stringField(inputJson, ["runId", "run_id"]) ?? `run-ask-${randomUUID()}`;
+        const job = createHardflowJob({
+          runId,
+          cwd,
+          rawUserPrompt,
+          promptHash: "",
+          turnId: stringField(inputJson, ["turnId", "turn_id"]) ?? runId,
+          triggerSource: "cli"
+        });
+        const completed = await runHardflowJobOnce(cwd, job.runId);
+        const reportPath = researchRunReportPath(cwd, completed.runId);
+        const evidenceLedgerPath = researchRunEvidenceLedgerPath(cwd, completed.runId);
+        printJson({
+          runId: completed.runId,
+          status: completed.status,
+          route: completed.route,
+          failureReason: completed.failureReason,
+          answerSource: completed.route === "research" && completed.status === "completed" ? "run_owned_research_report_and_evidence_ledger" : "router_result",
+          researchReportPath: existsSync(reportPath) ? reportPath : completed.researchReportPath,
+          evidenceLedgerPath: existsSync(evidenceLedgerPath) ? evidenceLedgerPath : completed.evidenceLedgerPath,
+          noOrdinaryWebFallback: true
+        });
+        if (completed.status === "failed" || completed.status === "cancelled") process.exitCode = 1;
+        return;
+      }
       case "route": {
         const parsed = parseFlagArgs(args);
         const inputJson = await readCommandInputJson(parsed.flags);
@@ -800,6 +832,7 @@ async function main(): Promise<void> {
         printJson({
           usage: [
             "codex-hardflow status",
+            "codex-hardflow ask [--run-id <runId>] \"task...\"",
             "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
             "codex-hardflow research --run-id <runId> \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",

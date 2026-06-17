@@ -3,9 +3,11 @@ import { appendHookEvent, hashAdditionalContext } from "../hookEvents.js";
 import { createHookMarker, type HookMarker } from "../hookState.js";
 import { hardflowInternalContext } from "../internalEnv.js";
 import { writeHookInputJson, type RoutePreflightRunner } from "./hookAutomation.js";
-import { hardflowJobPath, researchRunRouterTracePath } from "../paths.js";
+import { hardflowJobPath, researchRunEvidenceLedgerPath, researchRunReportPath, researchRunRouterTracePath } from "../paths.js";
 import { DEFAULT_AVAILABLE_AGENTS } from "../router/routerPrompt.js";
-import { createHardflowJob } from "../jobs/jobStore.js";
+import { completeHardflowJob, createHardflowJob, listHardflowJobs, readHardflowJob, refreshHardflowQueueState } from "../jobs/jobStore.js";
+import { DEFAULT_DAEMON_RUNTIME_CONFIG } from "../config.js";
+import type { HardflowJob } from "../jobs/jobSchema.js";
 
 export interface UserPromptSubmitOptions {
   routeRunner?: RoutePreflightRunner;
@@ -15,6 +17,17 @@ export interface UserPromptSubmitOptions {
 function allowOutput(additionalContext = ""): Record<string, unknown> {
   return {
     decision: "allow",
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext
+    }
+  };
+}
+
+function blockOutput(reason: string, additionalContext = ""): Record<string, unknown> {
+  return {
+    decision: "block",
+    reason,
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
       additionalContext
@@ -45,6 +58,75 @@ function buildAdditionalContext(params: {
   ].join(" ");
 }
 
+function isResultRequest(prompt: string): boolean {
+  const normalized = prompt.trim().toLowerCase();
+  return (
+    /查看\s*hardflow\s*结果/i.test(prompt) ||
+    /hardflow\s+status/i.test(normalized) ||
+    /hardflow\s+result/i.test(normalized) ||
+    /查看\s*runid/i.test(normalized) ||
+    /^继续$/.test(prompt.trim()) ||
+    /^结果呢[？?]?$/.test(prompt.trim())
+  );
+}
+
+function extractRequestedRunId(prompt: string): string | undefined {
+  const explicit = prompt.match(/runId\s*[:=]?\s*([A-Za-z0-9_.:-]+)/i) ?? prompt.match(/run[-_][A-Za-z0-9_.:-]+/);
+  return explicit ? (explicit[1] ?? explicit[0]) : undefined;
+}
+
+function latestJob(cwd: string): HardflowJob | null {
+  const jobs = listHardflowJobs(cwd);
+  return jobs.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] ?? null;
+}
+
+function isDirectAdmissionPrompt(prompt: string): boolean {
+  const trimmed = prompt.trim();
+  const lower = trimmed.toLowerCase();
+  const researchSignals = /(current|latest|前沿|现在|practical|solutions|方案|类似|项目|产品|compare|comparison|research|docs|github|security|hidden validation|long horizon)/i;
+  if (researchSignals.test(trimmed)) return false;
+  if (/^(hi|hello|hey|thanks|thank you)[.!?。！]*$/i.test(trimmed)) return true;
+  if (/^(translate|翻译)\b/i.test(trimmed)) return true;
+  if (/翻译成|翻译为|translate .* to /i.test(trimmed)) return true;
+  if (/^(rewrite|改写|润色)\b/i.test(trimmed)) return true;
+  if (/^quick answer[:：]/i.test(trimmed)) return true;
+  if (lower.length <= 80 && /^(what is|什么是|解释一下)\b/i.test(trimmed)) return true;
+  return false;
+}
+
+function statusReasonForJob(job: HardflowJob, action: "queued" | "pending" | "failed"): string {
+  const statusCommand = `codex-hardflow jobs status --run-id ${job.runId}`;
+  const queue = job.queuePosition !== null && job.queuePosition !== undefined ? ` queuePosition=${job.queuePosition}` : "";
+  if (action === "failed") {
+    return `HardFlow job failed. runId=${job.runId} status=${job.status}${queue} failureReason=${job.failureReason ?? "unknown"}. Ordinary answer is not allowed unless user explicitly approves downgrade. Check status with ${statusCommand}.`;
+  }
+  const lead = action === "queued" ? "HardFlow strict research queued." : "HardFlow job is not complete.";
+  return `${lead} runId=${job.runId} status=${job.status}${queue}. This research-heavy prompt will not be answered from ordinary web_search/manual notes. Check status with ${statusCommand}. To retrieve later, ask: 查看 HardFlow 结果 ${job.runId}.`;
+}
+
+function handleResultRequest(cwd: string, prompt: string): Record<string, unknown> | null {
+  if (!isResultRequest(prompt)) return null;
+  const runId = extractRequestedRunId(prompt);
+  const job = runId ? readHardflowJob(cwd, runId) : latestJob(cwd);
+  if (!job) {
+    return allowOutput("No HardFlow job was found for this workspace. Do not claim HardFlow research completed.");
+  }
+  refreshHardflowQueueState(cwd, DEFAULT_DAEMON_RUNTIME_CONFIG);
+  const refreshed = readHardflowJob(cwd, job.runId) ?? job;
+  if (refreshed.status === "completed") {
+    if (refreshed.route === "research") {
+      return allowOutput(
+        `HardFlow run ${refreshed.runId} is completed. Answer only from run-owned artifacts: research_report=${refreshed.researchReportPath ?? researchRunReportPath(cwd, refreshed.runId)}, evidence_ledger=${refreshed.evidenceLedgerPath ?? researchRunEvidenceLedgerPath(cwd, refreshed.runId)}. Do not use ordinary web_search/manual notes as a substitute.`
+      );
+    }
+    return allowOutput(`HardFlow run ${refreshed.runId} completed with route=${refreshed.route}; no strict research result is required.`);
+  }
+  if (refreshed.status === "failed" || refreshed.status === "cancelled") {
+    return blockOutput(statusReasonForJob(refreshed, "failed"), `HardFlow job failed or was cancelled. Ask the user before downgrading to App/manual search. runId=${refreshed.runId}.`);
+  }
+  return blockOutput(statusReasonForJob(refreshed, "pending"), `HardFlow job is still ${refreshed.status}. runId=${refreshed.runId}.`);
+}
+
 export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot = process.cwd(), options: UserPromptSubmitOptions = {}): Record<string, unknown> {
   void options;
   const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
@@ -72,6 +154,8 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
   }
   const prompt = String(input.prompt ?? input.user_prompt ?? input.message ?? "");
   if (!prompt.trim()) return allowOutput();
+  const resultRequest = handleResultRequest(cwd, prompt);
+  if (resultRequest) return resultRequest;
   const marker = createHookMarker({
     cwd,
     prompt,
@@ -106,6 +190,29 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
     triggerSource: "hook_user_prompt_submit"
   });
 
+  if (isDirectAdmissionPrompt(prompt)) {
+    const completed = completeHardflowJob(cwd, marker.runId, {
+      route: "direct_answer",
+      routerTracePath: null,
+      threadIds: []
+    });
+    const additionalContext = `codex-hardflow admission selected direct_answer for runId=${completed.runId}; no HardFlow strict research is required. Do not claim research_report/EvidenceLedger was produced.`;
+    appendHookEvent(cwd, {
+      eventName: "UserPromptSubmit",
+      runId: marker.runId,
+      turnId: marker.turnId,
+      promptHash: marker.promptHash,
+      triggerSource: marker.triggerSource,
+      programmaticTrigger: marker.programmaticTrigger,
+      decision: "allow",
+      injectedAdditionalContextHash: hashAdditionalContext(additionalContext)
+    });
+    return allowOutput(additionalContext);
+  }
+
+  refreshHardflowQueueState(cwd, DEFAULT_DAEMON_RUNTIME_CONFIG);
+  const queued = readHardflowJob(cwd, marker.runId) ?? job;
+
   const additionalContext = buildAdditionalContext({
     marker,
     absoluteCommand,
@@ -114,6 +221,7 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
     jobPath: hardflowJobPath(cwd, job.runId),
     agentNames
   });
+  const reason = statusReasonForJob(queued, "queued");
 
   appendHookEvent(cwd, {
     eventName: "UserPromptSubmit",
@@ -122,8 +230,10 @@ export function userPromptSubmit(input: Record<string, unknown> = {}, sourceRoot
     promptHash: marker.promptHash,
     triggerSource: marker.triggerSource,
     programmaticTrigger: marker.programmaticTrigger,
+    decision: "block",
+    reason,
     injectedAdditionalContextHash: hashAdditionalContext(additionalContext)
   });
 
-  return allowOutput(additionalContext);
+  return blockOutput(reason, additionalContext);
 }

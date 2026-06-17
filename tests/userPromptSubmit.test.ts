@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readHookEvents } from "../src/hookEvents.js";
 import { markerPathFor } from "../src/hookState.js";
 import { userPromptSubmit } from "../src/hooks/userPromptSubmit.js";
-import { readHardflowJob } from "../src/jobs/jobStore.js";
-import { hardflowJobPath, repoHash, researchRunHookInputPath, researchRunRouterTracePath } from "../src/paths.js";
+import { completeHardflowJob, createHardflowJob, failHardflowJob, readHardflowJob } from "../src/jobs/jobStore.js";
+import { hardflowJobPath, repoHash, researchRunHookInputPath, researchRunReportPath, researchRunRouterTracePath } from "../src/paths.js";
 
 function additionalContext(result: Record<string, unknown>): string {
   return String((result.hookSpecificOutput as Record<string, unknown> | undefined)?.additionalContext ?? "");
@@ -49,7 +49,9 @@ describe("UserPromptSubmit job enqueue", () => {
     );
     const job = readHardflowJob(cwd, "run-turn-userprompt-research");
 
-    expect(result.decision).toBe("allow");
+    expect(result.decision).toBe("block");
+    expect(String(result.reason)).toContain("HardFlow strict research queued");
+    expect(String(result.reason)).toContain("codex-hardflow jobs status --run-id run-turn-userprompt-research");
     expect((result.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
     expect(result).not.toHaveProperty("additionalContext");
     expect(routeCalls).toBe(0);
@@ -154,7 +156,8 @@ describe("UserPromptSubmit job enqueue", () => {
     const job = readHardflowJob(cwd, String(marker.runId));
 
     expect(existsSync(join(cwd, "AGENTS.md"))).toBe(false);
-    expect(result.decision).toBe("allow");
+    expect(result.decision).toBe("block");
+    expect(String(result.reason)).toContain("codex-hardflow jobs status");
     expect(marker.triggerSource).toBe("hook_user_prompt_submit");
     expect(marker.programmaticTrigger).toBe(true);
     expect(marker.routeStatus).toBe("router_required");
@@ -185,6 +188,64 @@ describe("UserPromptSubmit job enqueue", () => {
     expect(routeCalls).toBe(0);
     expect(marker.routeStatus).toBe("router_required");
     expect(additionalContext(result)).toContain("queued a HardFlow job");
+  });
+
+  it("allows completed HardFlow result retrieval from run-owned report", () => {
+    const cwd = tempRepo();
+    createHardflowJob({
+      runId: "run-result-completed",
+      cwd,
+      rawUserPrompt: "research task",
+      promptHash: "hash",
+      turnId: "turn-result-completed",
+      triggerSource: "cli"
+    });
+    completeHardflowJob(cwd, "run-result-completed", {
+      route: "research",
+      researchReportPath: researchRunReportPath(cwd, "run-result-completed"),
+      threadIds: []
+    });
+
+    const result = userPromptSubmit({ cwd, prompt: "查看 HardFlow 结果 run-result-completed", turnId: "turn-result-retrieve" }, process.cwd());
+    expect(result.decision).toBe("allow");
+    expect(additionalContext(result)).toContain("run-result-completed");
+    expect(additionalContext(result)).toContain("research_report");
+    expect(additionalContext(result)).toContain("evidence_ledger");
+  });
+
+  it("blocks pending HardFlow result retrieval with status command", () => {
+    const cwd = tempRepo();
+    createHardflowJob({
+      runId: "run-result-pending",
+      cwd,
+      rawUserPrompt: "research task",
+      promptHash: "hash",
+      turnId: "turn-result-pending",
+      triggerSource: "cli"
+    });
+
+    const result = userPromptSubmit({ cwd, prompt: "查看 HardFlow 结果 run-result-pending", turnId: "turn-result-pending-retrieve" }, process.cwd());
+    expect(result.decision).toBe("block");
+    expect(String(result.reason)).toContain("run-result-pending");
+    expect(String(result.reason)).toContain("codex-hardflow jobs status --run-id run-result-pending");
+  });
+
+  it("blocks failed HardFlow result retrieval with failure reason", () => {
+    const cwd = tempRepo();
+    createHardflowJob({
+      runId: "run-result-failed",
+      cwd,
+      rawUserPrompt: "research task",
+      promptHash: "hash",
+      turnId: "turn-result-failed",
+      triggerSource: "cli"
+    });
+    failHardflowJob(cwd, "run-result-failed", "router unavailable");
+
+    const result = userPromptSubmit({ cwd, prompt: "查看 HardFlow 结果 run-result-failed", turnId: "turn-result-failed-retrieve" }, process.cwd());
+    expect(result.decision).toBe("block");
+    expect(String(result.reason)).toContain("router unavailable");
+    expect(additionalContext(result)).toContain("Ask the user before downgrading");
   });
 
   it("includes local_repo and competitor researcher names in queued-job context", () => {
@@ -238,16 +299,18 @@ describe("UserPromptSubmit job enqueue", () => {
     expect(additionalContext(result)).not.toContain("app_handoff by default");
   });
 
-  it("queues even simple prompts for daemon routing without blocking in UserPromptSubmit", () => {
+  it("allows clear direct prompts without strict research admission block", () => {
     const cwd = tempRepo();
     const simple = userPromptSubmit({ cwd, prompt: "translate hello to Chinese" }, process.cwd());
     expect(simple.decision).toBe("allow");
     expect((simple.hookSpecificOutput as Record<string, unknown>).hookEventName).toBe("UserPromptSubmit");
-    expect(additionalContext(simple)).toContain("queued a HardFlow job");
+    expect(additionalContext(simple)).toContain("direct_answer");
+    expect(additionalContext(simple)).toContain("no HardFlow strict research is required");
     expect(additionalContext(simple)).not.toContain("research --runner app_handoff");
     const bypass = userPromptSubmit({ cwd, prompt: "quick answer: what is TypeScript?", turnId: "turn-bypass" }, process.cwd());
     expect(bypass.decision).toBe("allow");
-    expect(additionalContext(bypass)).toContain("jobs run-once --run-id run-turn-bypass");
+    expect(additionalContext(bypass)).toContain("direct_answer");
+    expect(readHardflowJob(cwd, "run-turn-bypass")?.status).toBe("completed");
   });
 
   it("keeps developer entrypoint warnings out of normal App instructions", () => {
@@ -261,7 +324,7 @@ describe("UserPromptSubmit job enqueue", () => {
       process.cwd()
     );
 
-    expect(result.decision).toBe("allow");
+    expect(result.decision).toBe("block");
     expect(additionalContext(result)).toContain("queued a HardFlow job");
     expect(additionalContext(result)).not.toContain("npx tsx src/cli.ts");
   });
