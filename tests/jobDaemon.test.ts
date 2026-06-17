@@ -69,9 +69,25 @@ describe("HardFlow job daemon mode", () => {
     expect(job?.routerProvider).toBe("codex_cli");
     expect(job?.workerProvider).toBe("codex_sdk");
     const stop = stopValidationGate({ cwd, turnId: "turn-job-pending" });
-    expect(stop.decision).toBe("block");
+    expect(stop.continue).toBe(false);
+    expect(stop.decision).toBeUndefined();
     expect(stop.hardflowStatus).toBe("hardflow_job_pending");
+    expect(String(stop.stopReason)).toContain(marker.runId);
+    expect(String(stop.stopReason)).toContain(`codex-hardflow jobs status --run-id ${marker.runId}`);
     expect((stop.progressSnapshot as { queuePosition?: number })?.queuePosition).toBe(1);
+  });
+
+  it("Stop hard-stops routing jobs", () => {
+    const cwd = tempRepo();
+    userPromptSubmit({ cwd, prompt: "What are current practical solutions for agent memory?", turnId: "turn-job-routing" }, process.cwd());
+    const marker = JSON.parse(readFileSync(markerPathFor(repoHash(cwd), "turn-job-routing"), "utf8")) as { runId: string };
+    updateHardflowJob(cwd, marker.runId, { status: "routing", route: "research" }, "routing");
+
+    const stop = stopValidationGate({ cwd, turnId: "turn-job-routing" });
+    expect(stop.continue).toBe(false);
+    expect(stop.decision).toBeUndefined();
+    expect(stop.hardflowStatus).toBe("hardflow_job_pending");
+    expect(String(stop.stopReason)).toContain("status=routing");
   });
 
   it("Stop pending/running block includes queue and worker progress snapshot", () => {
@@ -107,7 +123,7 @@ describe("HardFlow job daemon mode", () => {
       })}\n`
     );
 
-    const stop = stopValidationGate({ cwd, turnId: "turn-job-progress" });
+    const stop = stopValidationGate({ cwd, turnId: "turn-job-progress", ordinaryWebSearchNotes: "manual web answer draft should not pass" });
     const snapshot = stop.progressSnapshot as {
       runId: string;
       status: string;
@@ -115,7 +131,9 @@ describe("HardFlow job daemon mode", () => {
       runningBucketCount: number;
       currentWorkers: Array<{ bucket: string; status: string; currentStep: string; partialEvidenceCount: number; sourcesFoundCount: number }>;
     };
-    expect(stop.decision).toBe("block");
+    expect(stop.continue).toBe(false);
+    expect(stop.decision).toBeUndefined();
+    expect(String(stop.stopReason)).toContain(`codex-hardflow jobs status --run-id ${marker.runId}`);
     expect(snapshot.runId).toBe(marker.runId);
     expect(snapshot.status).toBe("researching");
     expect(snapshot.researchScope).toBe("external_exhaustive");
@@ -147,9 +165,10 @@ describe("HardFlow job daemon mode", () => {
     failHardflowJob(cwd, marker.runId, "router failed");
 
     const stop = stopValidationGate({ cwd, turnId: "turn-job-failed" });
-    expect(stop.decision).toBe("block");
+    expect(stop.continue).toBe(false);
+    expect(stop.decision).toBeUndefined();
     expect(stop.hardflowStatus).toBe("hardflow_job_failed");
-    expect(String(stop.reason)).toContain("router failed");
+    expect(String(stop.stopReason)).toContain("router failed");
   });
 
   it("jobs run-once completes a direct_answer job with mock router", async () => {

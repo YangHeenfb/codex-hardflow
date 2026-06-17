@@ -128,8 +128,9 @@ describe("programmatic trigger audit", () => {
     writeParentReport(cwd, marker, report);
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
-    expect(result.decision).toBe("block");
-    expect(String(result.reason)).toContain("programmaticTrigger");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
+    expect(String(result.stopReason)).toContain("programmaticTrigger");
   });
 
   it("records not_spawned when App subagents have not actually spawned", async () => {

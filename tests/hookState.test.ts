@@ -179,8 +179,10 @@ describe("hook marker Stop gate", () => {
     });
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
-    expect(result.decision).toBe("block");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
     expect(result.hardflowStatus).toBe("hardflow_job_missing");
+    expect(String(result.stopReason)).toContain(`codex-hardflow jobs status --run-id ${marker.runId}`);
   });
 
   it("Stop bypasses internal SDK/router calls without enforcing gates", () => {
@@ -216,8 +218,10 @@ describe("hook marker Stop gate", () => {
     createJobForMarker(cwd, marker, "pending");
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
-    expect(result.decision).toBe("block");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
     expect(result.hardflowStatus).toBe("hardflow_job_pending");
+    expect(String(result.stopReason)).toContain(`codex-hardflow jobs status --run-id ${marker.runId}`);
   });
 
   it("does not auto-run route or strict research for pending research jobs", () => {
@@ -239,7 +243,8 @@ describe("hook marker Stop gate", () => {
     createJobForMarker(cwd, marker, "pending");
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
-    expect(result.decision).toBe("block");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
     expect(result.hardflowStatus).toBe("hardflow_job_pending");
   });
 
@@ -263,9 +268,10 @@ describe("hook marker Stop gate", () => {
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
-    expect(result.decision).toBe("block");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
     expect(result.hardflowStatus).toBe("hardflow_job_failed");
-    expect(String(result.reason)).toContain("router timed out");
+    expect(String(result.stopReason)).toContain("router timed out");
   });
 
   it("allows direct_answer routes without research report", () => {
@@ -316,8 +322,9 @@ describe("hook marker Stop gate", () => {
     writeFileSync(researchRunReportPath(cwd, marker.runId), `${JSON.stringify({ ...report, generatedAt: new Date(Date.parse(marker.createdAt) + 1_000).toISOString() }, null, 2)}\n`);
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
-    expect(result.decision).toBe("block");
-    expect(String(result.reason)).toContain("requires strict_programmatic");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
+    expect(String(result.stopReason)).toContain("requires strict_programmatic");
   });
 
   it("blocks completed research jobs when strict report is still missing", () => {
@@ -326,9 +333,10 @@ describe("hook marker Stop gate", () => {
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
-    expect(result.decision).toBe("block");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
     expect(result.hardflowStatus).toBe("strict_research_report_missing");
-    expect(String(result.reason)).toContain("Stop hook does not run strict research");
+    expect(String(result.stopReason)).toContain("Stop hook does not run strict research");
   });
 
   it("blocks ordinary answers when completed research job lacks a valid report", () => {
@@ -337,9 +345,10 @@ describe("hook marker Stop gate", () => {
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
 
-    expect(result.decision).toBe("block");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
     expect(result.hardflowStatus).toBe("strict_research_report_missing");
-    expect(String(result.reason)).toContain("research_report.json is missing");
+    expect(String(result.stopReason)).toContain("research_report.json is missing");
   });
 
   it("blocks strict-looking research reports without sdk workers", async () => {
@@ -365,8 +374,9 @@ describe("hook marker Stop gate", () => {
     }
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
-    expect(result.decision).toBe("block");
-    expect(String(result.reason)).toContain("programmaticMultiAgent=true");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
+    expect(String(result.stopReason)).toContain("programmaticMultiAgent=true");
   });
 
   it("blocks strict research reports without EvidenceLedger", async () => {
@@ -387,8 +397,9 @@ describe("hook marker Stop gate", () => {
     writeFileSync(researchRunEvidenceLedgerPath(cwd, marker.runId), `${JSON.stringify({ runId: marker.runId, updatedAt: new Date().toISOString(), items: [] }, null, 2)}\n`);
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
-    expect(result.decision).toBe("block");
-    expect(String(result.reason)).toContain("non-empty EvidenceLedger");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
+    expect(String(result.stopReason)).toContain("non-empty EvidenceLedger");
   });
 
   it("blocks strict failed reports instead of allowing normal answer", () => {
@@ -415,9 +426,10 @@ describe("hook marker Stop gate", () => {
     }
 
     const result = stopValidationGate({ cwd, turnId: marker.turnId });
-    expect(result.decision).toBe("block");
+    expect(result.continue).toBe(false);
+    expect(result.decision).toBeUndefined();
     expect(result.hardflowStatus).toBe("strict_research_failed");
-    expect(String(result.reason)).toContain("sdk_threads runner unavailable");
+    expect(String(result.stopReason)).toContain("sdk_threads runner unavailable");
   });
 
   it("allows completed automatic strict exhaustive SDK research with EvidenceLedger", async () => {

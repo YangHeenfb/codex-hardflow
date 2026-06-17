@@ -59,6 +59,19 @@ function hardBlock(marker: HookMarker, reason: string, hardflowStatus = "strict_
   };
 }
 
+function hardStop(marker: HookMarker, stopReason: string, hardflowStatus: string, extras: Record<string, unknown> = {}): GateOutput {
+  const next = incrementBlockCount(marker);
+  return {
+    continue: false,
+    stopReason,
+    reason: stopReason,
+    systemMessage: "HardFlow research is running; wait for run-owned research_report/EvidenceLedger.",
+    hardflowStatus,
+    marker: { turnId: next.turnId, promptHash: next.promptHash, blockCount: next.blockCount, maxBlocks: next.maxBlocks },
+    ...extras
+  };
+}
+
 type WorkerProgressState = {
   bucket?: string;
   status?: string;
@@ -122,6 +135,44 @@ function hardflowJobProgressSnapshot(cwd: string, job: HardflowJob): Record<stri
       failureCategory: worker.failureCategory || undefined
     }))
   };
+}
+
+function firstBlockingWorker(snapshot: Record<string, unknown>): string | null {
+  const workers = Array.isArray(snapshot.currentWorkers) ? snapshot.currentWorkers : [];
+  for (const worker of workers) {
+    if (typeof worker !== "object" || worker === null) continue;
+    const item = worker as Record<string, unknown>;
+    const status = String(item.status ?? "");
+    if (status === "running" || status === "pending" || status === "needs_resume" || status === "failed" || status === "timeout") {
+      const bucket = String(item.bucket ?? "unknown");
+      const step = typeof item.currentStep === "string" && item.currentStep.length > 0 ? `, currentStep=${item.currentStep}` : "";
+      const failure = typeof item.failureCategory === "string" && item.failureCategory.length > 0 ? `, failureCategory=${item.failureCategory}` : "";
+      return `${bucket}:${status}${step}${failure}`;
+    }
+  }
+  return null;
+}
+
+function stopReasonForJob(job: HardflowJob, snapshot: Record<string, unknown>, failureReason?: string): string {
+  const parts = [
+    failureReason ? "HardFlow job failed." : "HardFlow job is still running.",
+    `runId=${job.runId}`,
+    `status=${job.status}`,
+    snapshot.queuePosition !== null && snapshot.queuePosition !== undefined ? `queuePosition=${snapshot.queuePosition}` : "",
+    typeof snapshot.elapsedMs === "number" ? `elapsedMs=${snapshot.elapsedMs}` : "",
+    snapshot.route ? `route=${snapshot.route}` : "",
+    snapshot.researchScope ? `researchScope=${snapshot.researchScope}` : "",
+    snapshot.requiredBucketCount !== undefined ? `requiredBucketCount=${snapshot.requiredBucketCount}` : "",
+    snapshot.completedBucketCount !== undefined ? `completedBucketCount=${snapshot.completedBucketCount}` : "",
+    snapshot.runningBucketCount !== undefined ? `runningBucketCount=${snapshot.runningBucketCount}` : "",
+    snapshot.failedBucketCount !== undefined ? `failedBucketCount=${snapshot.failedBucketCount}` : "",
+    snapshot.coverageScoreSoFar !== undefined ? `coverageScoreSoFar=${snapshot.coverageScoreSoFar}` : "",
+    firstBlockingWorker(snapshot) ? `blockingWorker=${firstBlockingWorker(snapshot)}` : "",
+    failureReason ? `failureReason=${failureReason}` : "",
+    `nextCommand=codex-hardflow jobs status --run-id ${job.runId}`,
+    failureReason ? "Ordinary answer is not allowed unless user explicitly approves downgrade." : "Ordinary web_search/manual answer is not allowed until strict research completes."
+  ].filter((part) => String(part).length > 0);
+  return parts.join(", ");
 }
 
 function configWithDefaults(config: Partial<TriggerRuntimeConfig> | undefined): TriggerRuntimeConfig {
@@ -358,27 +409,25 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
   if (marker.programmaticTrigger === true) {
     const job = readHardflowJob(cwd, marker.runId);
     if (!job) {
-      return finish(hardBlock(marker, `HardFlow job is missing for runId=${marker.runId}. Stop hook fails closed; hooks should enqueue .agent/hardflow/jobs/<runId>.json.`, "hardflow_job_missing"));
+      return finish(
+        hardStop(
+          marker,
+          `HardFlow job is missing. runId=${marker.runId}, nextCommand=codex-hardflow jobs status --run-id ${marker.runId}. Ordinary answer is not allowed until the HardFlow job state is repaired or the user explicitly approves downgrade.`,
+          "hardflow_job_missing"
+        )
+      );
     }
     if (job.status === "pending" || job.status === "routing" || job.status === "researching") {
       const progressSnapshot = hardflowJobProgressSnapshot(cwd, job);
-      return finish(
-        {
-          ...hardBlock(
-            marker,
-            `HardFlow job is ${job.status}. runId=${job.runId}, queuePosition=${progressSnapshot.queuePosition ?? "unknown"}, requiredBucketCount=${progressSnapshot.requiredBucketCount ?? 0}, completedBucketCount=${progressSnapshot.completedBucketCount ?? 0}. Run codex-hardflow jobs run-once --run-id ${job.runId} or keep daemon running.`,
-            "hardflow_job_pending"
-          ),
-          progressSnapshot
-        },
-        "hardflow_job_pending"
-      );
+      return finish(hardStop(marker, stopReasonForJob(job, progressSnapshot), "hardflow_job_pending", { progressSnapshot }), "hardflow_job_pending");
     }
     if (job.status === "failed") {
-      return finish(hardBlock(marker, `HardFlow job failed: ${job.failureReason ?? "missing failureReason"}. Do not answer from ordinary web_search/manual notes unless the user explicitly approves downgrade.`, "hardflow_job_failed"));
+      const progressSnapshot = hardflowJobProgressSnapshot(cwd, job);
+      return finish(hardStop(marker, stopReasonForJob(job, progressSnapshot, job.failureReason ?? "missing failureReason"), "hardflow_job_failed", { progressSnapshot }));
     }
     if (job.status === "cancelled") {
-      return finish(hardBlock(marker, `HardFlow job was cancelled: ${job.failureReason ?? "cancelled"}.`, "hardflow_job_cancelled"));
+      const progressSnapshot = hardflowJobProgressSnapshot(cwd, job);
+      return finish(hardStop(marker, stopReasonForJob(job, progressSnapshot, job.failureReason ?? "cancelled"), "hardflow_job_cancelled", { progressSnapshot }));
     }
     if (job.status === "completed" && (job.route === "direct_answer" || job.route === "bypass")) {
       updateMarker(marker, { status: "completed", routeStatus: "routed", routerRoute: job.route });
@@ -427,18 +476,52 @@ export function stopValidationGate(input: Record<string, unknown> = {}, options:
   if (automaticRouterResearch) {
     const current = currentReportForMarker(cwd, marker);
     if (!current.report) {
-      return finish(hardBlock(marker, `${current.reason ?? "strict research_report.json is missing."} Stop hook does not run strict research; run codex-hardflow jobs run-once or daemon run.`, "strict_research_report_missing"));
+      return finish(
+        hardStop(
+          marker,
+          `${current.reason ?? "strict research_report.json is missing."} runId=${marker.runId}, nextCommand=codex-hardflow jobs status --run-id ${marker.runId}. Stop hook does not run strict research; ordinary web_search/manual answer is not allowed until run-owned research_report/EvidenceLedger exists.`,
+          "strict_research_report_missing"
+        )
+      );
     }
     if (current.report.runner_mode !== "strict_programmatic" && current.report.runner_mode !== "sdk_threads") {
-      return finish(hardBlock(marker, `route=research requires strict_programmatic/sdk_threads research; runner_mode=${current.report.runner_mode} cannot satisfy it.`, "strict_research_wrong_runner"));
+      return finish(
+        hardStop(
+          marker,
+          `route=research requires strict_programmatic/sdk_threads research; runner_mode=${current.report.runner_mode} cannot satisfy it. runId=${marker.runId}, nextCommand=codex-hardflow jobs status --run-id ${marker.runId}. Ordinary answer is not allowed unless the user explicitly approves downgrade.`,
+          "strict_research_wrong_runner"
+        )
+      );
     }
     if (current.report.status === "failed") {
-      return finish(hardBlock(marker, `strict_programmatic research failed: ${current.report.failure_reason ?? "missing failure_reason"}. Ask the user before downgrading to App/manual search.`, "strict_research_failed"));
+      return finish(
+        hardStop(
+          marker,
+          `strict_programmatic research failed. runId=${marker.runId}, failureReason=${current.report.failure_reason ?? "missing failure_reason"}, nextCommand=codex-hardflow jobs status --run-id ${marker.runId}. Ordinary answer is not allowed unless the user explicitly approves downgrade.`,
+          "strict_research_failed"
+        )
+      );
     }
     const report = validateCurrentResearchReport(cwd, marker);
-    if (!report.valid) return finish(hardBlock(marker, report.reason ?? "strict_programmatic research_report.json does not satisfy the current hardflow marker.", "strict_research_invalid"));
+    if (!report.valid) {
+      return finish(
+        hardStop(
+          marker,
+          `${report.reason ?? "strict_programmatic research_report.json does not satisfy the current hardflow marker."} runId=${marker.runId}, nextCommand=codex-hardflow jobs status --run-id ${marker.runId}. Ordinary answer is not allowed until strict research artifacts pass the Stop gate.`,
+          "strict_research_invalid"
+        )
+      );
+    }
     const artifacts = validateAutomaticStrictResearchArtifacts(cwd, current.report);
-    if (!artifacts.valid) return finish(hardBlock(marker, artifacts.reason ?? "strict_programmatic research artifacts are incomplete.", "strict_research_artifacts_incomplete"));
+    if (!artifacts.valid) {
+      return finish(
+        hardStop(
+          marker,
+          `${artifacts.reason ?? "strict_programmatic research artifacts are incomplete."} runId=${marker.runId}, nextCommand=codex-hardflow jobs status --run-id ${marker.runId}. Ordinary answer is not allowed until strict research artifacts pass the Stop gate.`,
+          "strict_research_artifacts_incomplete"
+        )
+      );
+    }
   }
 
   const requiresSourceMatrix = routerOutput?.requiresSourceMatrix ?? marker.requiresSourceMatrix;

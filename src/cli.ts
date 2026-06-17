@@ -642,7 +642,7 @@ async function main(): Promise<void> {
           printJson({ jobs: listHardflowJobs(cwd) });
           return;
         }
-        if (subcommand === "show") {
+        if (subcommand === "show" || subcommand === "status") {
           const runId = stringFlag(parsed.flags, "run-id", true) ?? "";
           printJson(readHardflowJob(cwd, runId));
           return;
@@ -656,7 +656,7 @@ async function main(): Promise<void> {
           printJson({ jobs: await runPendingHardflowJobs(cwd) });
           return;
         }
-        throw new Error("Usage: codex-hardflow jobs <list|show|run-once|run-pending>");
+        throw new Error("Usage: codex-hardflow jobs <list|show|status|run-once|run-pending>");
       }
       case "daemon": {
         const subcommand = args[0];
@@ -827,6 +827,7 @@ async function main(): Promise<void> {
             "codex-hardflow daemon stop",
             "codex-hardflow jobs list",
             "codex-hardflow jobs show --run-id <runId>",
+            "codex-hardflow jobs status --run-id <runId>",
             "codex-hardflow jobs run-once --run-id <runId>",
             "codex-hardflow jobs run-pending",
             "codex-hardflow eval coverage [--run-id <runId>|--latest-evidence-run] [--include-test-runs] [--baseline-run-id <runId>]",
