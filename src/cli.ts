@@ -420,6 +420,8 @@ async function main(): Promise<void> {
           maxSourcesPerWorker: numberFlag(parsed.flags, "max-sources-per-worker"),
           progressMode,
           progressIntervalMs: numberFlag(parsed.flags, "progress-interval-ms"),
+          progressPollIntervalMs: numberFlag(parsed.flags, "progress-poll-interval-ms"),
+          progressFrameIntervalMs: numberFlag(parsed.flags, "progress-frame-interval-ms"),
           fancyProgress: booleanFlag(parsed.flags, "fancy-progress"),
           isProgressTty: process.stderr.isTTY,
           progressWriter: (message) => process.stderr.write(message),
@@ -915,7 +917,7 @@ async function main(): Promise<void> {
         printJson({
           usage: [
             "codex-hardflow status",
-            "codex-hardflow ask [--json] [--async] [--from-run <runId>] [--run-id <runId>] [--timeout-ms <ms>] [--coverage-mode exhaustive|balanced|fast] [--parallel-policy all_required|adaptive|conservative] [--router-provider codex_cli|codex_sdk|mock|openai_structured_output] [--worker-provider codex_sdk|codex_cli|source_adapters|mock] [--answer-synthesis-provider codex_cli|codex_sdk|mock] [--max-sources-per-worker <n>] [--progress auto|minimal|quiet|verbose|json] [--progress-interval-ms <ms>] [--max-sources-in-answer <n>] [--show-all-sources] [--show-evidence-ids] [--raw-evidence-summary] \"question...\"",
+            "codex-hardflow ask [--json] [--async] [--from-run <runId>] [--run-id <runId>] [--timeout-ms <ms>] [--coverage-mode exhaustive|balanced|fast] [--parallel-policy all_required|adaptive|conservative] [--router-provider codex_cli|codex_sdk|mock|openai_structured_output] [--worker-provider codex_sdk|codex_cli|source_adapters|mock] [--answer-synthesis-provider codex_cli|codex_sdk|mock] [--max-sources-per-worker <n>] [--progress auto|minimal|quiet|verbose|json] [--progress-interval-ms <ms>] [--progress-poll-interval-ms <ms>] [--progress-frame-interval-ms <ms>] [--max-sources-in-answer <n>] [--show-all-sources] [--show-evidence-ids] [--raw-evidence-summary] \"question...\"",
             "codex-hardflow route [--run-id <runId>] [--owner parent|subagent] [--parent-run-id <runId>] [--subagent-name <agent>] [--bucket <bucket>] [--write-trace] \"task...\"",
             "codex-hardflow research --run-id <runId> \"task...\"",
             "codex-hardflow research --run-id <runId> --runner app_handoff \"task...\"",

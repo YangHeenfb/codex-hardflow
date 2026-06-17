@@ -107,6 +107,8 @@ const STRING_FLAGS = new Set([
   "worker-provider",
   "progress",
   "progress-interval-ms",
+  "progress-poll-interval-ms",
+  "progress-frame-interval-ms",
   "max-sources-in-answer",
   "answer-synthesis-provider"
 ]);

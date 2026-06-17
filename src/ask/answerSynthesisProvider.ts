@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { hardflowRunCodexHome } from "../paths.js";
 import { prepareIsolatedCodexHome } from "../codexHomeIsolation.js";
 import { runIsolatedCodexPrompt } from "../codexRunner.js";
@@ -120,22 +120,19 @@ function sanitizeOutput(value: string): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 4000);
 }
 
-function runCodexCliSynthesis(prompt: string, options: AnswerSynthesisProviderOptions): string {
+async function runCodexCliSynthesis(prompt: string, options: AnswerSynthesisProviderOptions): Promise<string> {
   const isolatedCodexHome = prepareIsolatedCodexHome(hardflowRunCodexHome(options.cwd, options.runId));
   const env = internalEnvFor({ ...process.env, CODEX_HOME: isolatedCodexHome }, "answer_synthesis", options.runId);
-  const result = spawnSync("codex", ["exec", "--skip-git-repo-check", "--ignore-rules", "--sandbox", "read-only"], {
+  const result = await runCodexCliProcess("codex", prompt, {
     cwd: options.cwd,
     env,
-    input: prompt,
-    encoding: "utf8",
-    timeout: options.timeoutMs ?? 180_000,
+    timeoutMs: options.timeoutMs ?? 180_000,
     maxBuffer: 1024 * 1024
   });
-  if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`codex_cli answer synthesis exited with status ${result.status ?? "unknown"}: ${sanitizeOutput(result.stderr ?? result.stdout ?? "")}`);
+    throw new Error(`codex_cli answer synthesis exited with status ${result.status ?? "unknown"}: ${sanitizeOutput(result.stderr || result.stdout)}`);
   }
-  return (result.stdout ?? "").trim();
+  return result.stdout.trim();
 }
 
 async function runCodexSdkSynthesis(prompt: string, options: AnswerSynthesisProviderOptions): Promise<string> {
@@ -162,7 +159,7 @@ export async function synthesizeAnswerBodyWithProvider(options: AnswerSynthesisP
   const prompt = buildSynthesisPrompt(options);
   try {
     const answerBody =
-      options.provider === "codex_cli" ? runCodexCliSynthesis(prompt, options) : await runCodexSdkSynthesis(prompt, options);
+      options.provider === "codex_cli" ? await runCodexCliSynthesis(prompt, options) : await runCodexSdkSynthesis(prompt, options);
     if (!answerBody) throw new Error("empty answer synthesis response");
     return { answerBody, provider: options.provider, warning: null };
   } catch (error) {
@@ -173,4 +170,54 @@ export async function synthesizeAnswerBodyWithProvider(options: AnswerSynthesisP
       warning: reason
     };
   }
+}
+
+async function runCodexCliProcess(
+  command: string,
+  input: string,
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxBuffer: number }
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, ["exec", "--skip-git-repo-check", "--ignore-rules", "--sandbox", "read-only"], {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, options.timeoutMs);
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    };
+    const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
+      if (target === "stdout") stdout += chunk.toString("utf8");
+      else stderr += chunk.toString("utf8");
+      if (stdout.length + stderr.length > options.maxBuffer) {
+        child.kill("SIGTERM");
+        fail(new Error(`codex_cli answer synthesis exceeded max output buffer: ${options.maxBuffer}`));
+      }
+    };
+    child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
+    child.on("error", fail);
+    child.on("close", (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`codex_cli answer synthesis timed out after ${options.timeoutMs}ms`));
+        return;
+      }
+      resolve({ status, stdout, stderr });
+    });
+    child.stdin.end(input);
+  });
 }

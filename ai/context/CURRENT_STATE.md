@@ -1,5 +1,120 @@
 # Current State
 
+## Current Snapshot: Ask Progress Non-Researching Animation Fix
+
+Last updated: 2026-06-18
+
+Branch:
+
+- `main`
+
+Current objective:
+
+- Fix `codex-hardflow ask` progress states where only `researching` animated
+  correctly while `routing` / `synthesizing` could appear stuck on the first
+  highlighted letter.
+
+Root cause:
+
+- The animation timer needs the Node event loop to keep running.
+- `researching` uses asynchronous SDK worker execution, so the event loop keeps
+  advancing progress frames.
+- `codex_cli` router and answer synthesis were using `spawnSync`, which blocks
+  the event loop while routing/synthesis runs. During those states the renderer
+  only got its initial forced frame, so the first highlighted letter appeared
+  stuck.
+
+Implementation summary:
+
+- Replaced synchronous `spawnSync` usage with async `spawn` in:
+  - `src/router/providers/codexCli.ts`
+  - `src/ask/answerSynthesisProvider.ts`
+- Preserved isolated `CODEX_HOME`, internal hardflow env, timeout, max-buffer,
+  stderr/stdout sanitization, and nonzero exit behavior.
+- Added tests using delayed fake `codex` commands to confirm timer callbacks
+  fire while router and answer synthesis child processes are running.
+
+Verification:
+
+- `npm test -- tests/codexCliRouterProvider.test.ts tests/askOutput.test.ts tests/askCli.test.ts`: passed.
+- `npm run build`: passed.
+- `npm test`: passed, 30 test files and 266 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed, package entry count `213`.
+
+Safety / scope notes:
+
+- Did not modify SDK runner behavior.
+- Did not modify daemon/job architecture.
+- Did not modify coverage policy.
+- Did not do computed confidence.
+- Did not do hidden validator work.
+- Did not run a large experiment.
+- Did not modify global files or run `install-global`.
+- Build updated `dist/`; the global wrapper points at this repo, so no hook
+  re-trust is required for these CLI progress changes.
+
+## Current Snapshot: Ask Dynamic Progress Animation
+
+Last updated: 2026-06-18
+
+Branch:
+
+- `main`
+
+Current objective:
+
+- Make `codex-hardflow ask` default TTY progress feel like a live CLI status
+  line instead of a 10-second sparse refresh.
+- Keep non-TTY logs sparse and keep JSON stdout clean.
+
+Implementation summary:
+
+- TTY `auto` / `minimal` progress now uses one-line dynamic rendering with the
+  status word animated by rotating reverse-video highlight across its letters.
+- The renderer now separates progress animation frames from state snapshots:
+  frame redraw default is `150ms`, while job/worker snapshot polling defaults
+  to `1000ms`.
+- Added `progressFrameIntervalMs` and `progressPollIntervalMs` run options plus
+  CLI flags `--progress-frame-interval-ms` and
+  `--progress-poll-interval-ms`.
+- `--progress-interval-ms` remains the text-log throttle for non-TTY / verbose
+  output.
+- Dynamic TTY rendering no longer lets duplicate suppression or the old 10s
+  interval block animation frames.
+- `minimal` progress hides the run id; `auto` keeps the short run id.
+- `finish()` still clears the active terminal line and writes a clean newline
+  before the final answer or error output.
+
+Smoke:
+
+- Ran mock ask with default progress in non-TTY mode:
+  `codex-hardflow ask "agent 记忆管理方面现在有什么前沿方案？" --router-provider mock --worker-provider mock --answer-synthesis-provider mock`
+- Result: sparse progress lines only, final Chinese answer starts on a clean new
+  line, no duplicated sources/caveats.
+- TTY animation behavior is covered by renderer unit tests because this
+  execution environment does not expose a stable interactive TTY for visual
+  inspection.
+
+Verification:
+
+- `npm run build`: passed.
+- `npm test`: passed, 30 test files and 264 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed, package entry count `213`.
+
+Safety / scope notes:
+
+- Did not modify SDK runner behavior.
+- Did not modify daemon/job architecture.
+- Did not modify coverage policy.
+- Did not do computed confidence.
+- Did not do hidden validator work.
+- Did not run a large experiment or real SDK research smoke.
+- Did not modify global files or run `install-global`.
+- Build updated `dist/`; the global wrapper already points at this repo, so no
+  hook re-trust is required for these CLI progress changes.
+
 ## Current Snapshot: Ask Synthesis And Progress Output Fix
 
 Last updated: 2026-06-18

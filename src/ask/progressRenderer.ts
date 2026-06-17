@@ -21,6 +21,7 @@ export interface AskProgressRendererOptions {
   mode?: AskProgressMode;
   isTty?: boolean;
   intervalMs?: number;
+  frameIntervalMs?: number;
   fancy?: boolean;
   now?: () => number;
   write: (message: string) => void;
@@ -44,13 +45,20 @@ function displayStatus(status: string): string {
   return status;
 }
 
-function compactLine(snapshot: AskProgressSnapshot, marker = "HardFlow"): string {
+function animateStatus(status: string, frame: number): string {
+  if (status.length === 0) return status;
+  const index = frame % status.length;
+  return `${status.slice(0, index)}\x1b[7m${status[index]}\x1b[0m${status.slice(index + 1)}`;
+}
+
+function compactLine(snapshot: AskProgressSnapshot, options: { marker?: string; animatedStatus?: string; includeRunId?: boolean } = {}): string {
   const completed = snapshot.completedBucketCount ?? 0;
   const failed = snapshot.failedBucketCount ?? 0;
   const required = snapshot.requiredBucketCount ?? snapshot.activeWorkerCount ?? 0;
   const coverage = snapshot.coverageScoreSoFar ?? "n/a";
   const failedPart = failed > 0 ? ` | ${failed} failed` : "";
-  return `${marker} ${displayStatus(snapshot.status)} ${formatElapsed(snapshot.elapsedMs)} | ${completed}/${required} workers${failedPart} | coverage ${coverage} | run ${shortRunId(snapshot.runId)}`;
+  const runPart = options.includeRunId === false ? "" : ` | run ${shortRunId(snapshot.runId)}`;
+  return `${options.marker ?? "HardFlow"} ${options.animatedStatus ?? displayStatus(snapshot.status)} ${formatElapsed(snapshot.elapsedMs)} | ${completed}/${required} workers${failedPart} | coverage ${coverage}${runPart}`;
 }
 
 function verboseLine(snapshot: AskProgressSnapshot): string {
@@ -76,6 +84,7 @@ export class AskProgressRenderer {
   private readonly mode: AskProgressMode;
   private readonly isTty: boolean;
   private readonly intervalMs: number;
+  private readonly frameIntervalMs: number;
   private readonly fancy: boolean;
   private readonly now: () => number;
   private readonly write: (message: string) => void;
@@ -84,14 +93,20 @@ export class AskProgressRenderer {
   private lastAt = 0;
   private lastStatus = "";
   private carriageLineOpen = false;
+  private animationFrame = 0;
 
   constructor(options: AskProgressRendererOptions) {
     this.mode = options.mode ?? "auto";
     this.isTty = options.isTty === true;
     this.intervalMs = options.intervalMs ?? 10_000;
+    this.frameIntervalMs = options.frameIntervalMs ?? 150;
     this.fancy = options.fancy === true;
     this.now = options.now ?? (() => Date.now());
     this.write = options.write;
+  }
+
+  usesDynamicTty(): boolean {
+    return (this.mode === "auto" || this.mode === "minimal") && this.isTty;
   }
 
   render(snapshot: AskProgressSnapshot, force = false): void {
@@ -99,9 +114,11 @@ export class AskProgressRenderer {
     const now = this.now();
     const key = snapshotKey(snapshot);
     const statusChanged = snapshot.status !== this.lastStatus;
+    const dynamicTty = this.usesDynamicTty();
     const minInterval = (this.mode === "auto" || this.mode === "minimal") && !this.isTty ? Math.max(30_000, this.intervalMs) : this.intervalMs;
-    if (!force && key === this.lastKey && now - this.lastAt < minInterval) return;
-    if (!force && !statusChanged && now - this.lastAt < minInterval && this.mode !== "json") return;
+    if (!dynamicTty && !force && key === this.lastKey && now - this.lastAt < minInterval) return;
+    if (!dynamicTty && !force && !statusChanged && now - this.lastAt < minInterval && this.mode !== "json") return;
+    if (dynamicTty && !force && now - this.lastAt < this.frameIntervalMs) return;
 
     if (this.mode === "json") {
       const line = JSON.stringify({ event: snapshot.event ?? "progress", ...snapshot });
@@ -111,11 +128,16 @@ export class AskProgressRenderer {
     } else {
       const spinnerFrames = ["-", "\\", "|", "/"];
       const marker = this.fancy ? spinnerFrames[Math.floor(now / 250) % spinnerFrames.length] : "HardFlow";
-      const line = this.mode === "verbose" ? verboseLine(snapshot) : compactLine(snapshot, marker);
-      if (line === this.lastRendered) return;
-      if ((this.mode === "auto" || this.mode === "minimal") && this.isTty) {
+      const animatedStatus = dynamicTty ? animateStatus(displayStatus(snapshot.status), this.animationFrame) : undefined;
+      const line =
+        this.mode === "verbose"
+          ? verboseLine(snapshot)
+          : compactLine(snapshot, { marker, animatedStatus, includeRunId: this.mode !== "minimal" });
+      if (!dynamicTty && line === this.lastRendered) return;
+      if (dynamicTty) {
         this.write(`\x1b[2K\r${line}`);
         this.carriageLineOpen = true;
+        this.animationFrame += 1;
       } else {
         this.write(`${line}\n`);
         this.carriageLineOpen = false;

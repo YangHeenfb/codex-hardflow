@@ -50,4 +50,40 @@ printf '{"ok":true}'
     delete process.env.CAPTURE_ENV;
     delete process.env.CODEX_HARDFLOW_SOURCE_CODEX_HOME;
   });
+
+  it("does not block the Node event loop while codex_cli route runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hardflow-codex-cli-provider-async-"));
+    const fakeCodex = join(dir, "codex");
+    const sourceCodexHome = join(dir, "source-codex-home");
+    const isolatedCodexHome = join(dir, "codex-home");
+    mkdirSync(sourceCodexHome);
+    writeFileSync(join(sourceCodexHome, "auth.json"), "{}\n");
+    writeFileSync(
+      fakeCodex,
+      `#!/bin/sh
+cat >/dev/null
+sleep 0.1
+printf '{"ok":true}'
+`
+    );
+    chmodSync(fakeCodex, 0o755);
+    process.env.CODEX_HARDFLOW_SOURCE_CODEX_HOME = sourceCodexHome;
+    let timerFired = false;
+    setTimeout(() => {
+      timerFired = true;
+    }, 20);
+
+    await runCodexCliRouterPrompt(
+      { rawUserPrompt: "research current agent memory", currentRunId: "run-codex-cli-provider-async" },
+      {
+        cwd: dir,
+        isolatedCodexHome,
+        runId: "run-codex-cli-provider-async",
+        codexCommand: fakeCodex
+      }
+    );
+
+    expect(timerFired).toBe(true);
+    delete process.env.CODEX_HARDFLOW_SOURCE_CODEX_HOME;
+  });
 });

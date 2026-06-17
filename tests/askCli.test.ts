@@ -135,6 +135,19 @@ describe("codex-hardflow ask CLI", () => {
     expect(cli.stderr).not.toContain("HardFlow researching");
   });
 
+  it("ask --json --progress json writes progress JSONL to stderr only", () => {
+    const cwd = tempRepo();
+    const cli = runCli(cwd, ["ask", "--json", "--progress", "json", "--router-provider", "mock", "--worker-provider", "mock", "What are current practical solutions?"]);
+    const parsed = JSON.parse(cli.stdout) as { status: string };
+    const firstProgress = JSON.parse(cli.stderr.trim().split("\n")[0] ?? "{}") as { event?: string; runId?: string };
+
+    expect(cli.status).toBe(0);
+    expect(parsed.status).toBe("completed");
+    expect(firstProgress.event).toBeTruthy();
+    expect(firstProgress.runId).toBeTruthy();
+    expect(cli.stdout).not.toContain("\"event\":\"progress\"");
+  });
+
   it("ask failed exits nonzero", () => {
     const cwd = tempRepo();
     createHardflowJob({

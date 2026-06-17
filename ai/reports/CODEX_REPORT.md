@@ -1,5 +1,130 @@
 # Codex Report
 
+## Report Entry: Ask Progress Animation Event-Loop Fix
+
+### Task
+
+Fix the follow-up progress issue where `researching` animated but other states
+could keep the highlight stuck on the first letter.
+
+### Root Cause
+
+The renderer timer was working, but two `codex_cli` phases blocked the Node
+event loop:
+
+- router preflight used synchronous `spawnSync`;
+- final answer synthesis used synchronous `spawnSync`.
+
+`researching` animated because SDK worker execution is asynchronous. Routing and
+synthesis did not animate because their child process calls prevented the 150ms
+frame timer from running.
+
+### Summary
+
+- Converted `codex_cli` router execution to async `spawn`.
+- Converted `codex_cli` answer synthesis execution to async `spawn`.
+- Kept timeout handling, output buffer limits, isolated `CODEX_HOME`, internal
+  hardflow env, and nonzero exit errors.
+- Added regression tests with delayed fake `codex` commands proving Node timers
+  fire while router and synthesis providers are waiting on child processes.
+
+### Files Changed
+
+- `src/router/providers/codexCli.ts`
+- `src/ask/answerSynthesisProvider.ts`
+- `tests/codexCliRouterProvider.test.ts`
+- `tests/askOutput.test.ts`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Verification
+
+- `npm test -- tests/codexCliRouterProvider.test.ts tests/askOutput.test.ts tests/askCli.test.ts`: passed.
+- `npm run build`: passed.
+- `npm test`: passed, 30 test files and 266 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed, package entry count `213`.
+
+### Safety
+
+- No SDK runner changes.
+- No daemon/job architecture changes.
+- No coverage policy changes.
+- No computed confidence work.
+- No hidden validator work.
+- No large diagnostics experiment.
+- No global files changed.
+- No `install-global` run.
+
+## Report Entry: Ask Dynamic Progress Animation
+
+### Task
+
+Implement the ask progress plan: default TTY progress should be a live
+single-line status with animated letters, while non-TTY logs stay sparse and
+JSON output stays clean.
+
+### Summary
+
+Updated the ask progress renderer and runner:
+
+- TTY `auto` and `minimal` progress now redraw a single terminal line.
+- The displayed status word rotates a reverse-video highlight across its
+  letters, giving the requested “letters blinking in turn” effect.
+- Animation frames default to `150ms`.
+- Job/worker snapshots are still polled separately, defaulting to `1000ms`, so
+  animation does not repeatedly read state files.
+- Non-TTY `auto` remains sparse and suppresses identical status lines.
+- `finish()` clears the active progress line and emits a clean newline before
+  the final answer or error.
+- `minimal` hides the run id; `auto` shows a short run id.
+- Added CLI flags:
+  - `--progress-frame-interval-ms`
+  - `--progress-poll-interval-ms`
+- Kept `--progress-interval-ms` as the non-TTY / verbose text-log throttle.
+
+### Files Changed
+
+- `src/ask/progressRenderer.ts`
+- `src/ask/askRunner.ts`
+- `src/cli.ts`
+- `src/flagParser.ts`
+- `tests/askOutput.test.ts`
+- `tests/askCli.test.ts`
+- `ai/context/CURRENT_STATE.md`
+- `ai/reports/CODEX_REPORT.md`
+
+### Smoke
+
+Ran mock ask with default progress:
+
+`codex-hardflow ask "agent 记忆管理方面现在有什么前沿方案？" --router-provider mock --worker-provider mock --answer-synthesis-provider mock`
+
+Result:
+
+- Non-TTY output used sparse progress lines.
+- Final Chinese answer started on a clean new line.
+- No duplicated sources/caveats.
+- TTY animation behavior is covered by renderer tests.
+
+### Verification
+
+- `npm run build`: passed.
+- `npm test`: passed, 30 test files and 264 tests.
+- `npm run verify`: passed.
+- `npm pack --dry-run --json`: passed, package entry count `213`.
+
+### Safety
+
+- No SDK runner changes.
+- No daemon/job architecture changes.
+- No coverage policy changes.
+- No computed confidence work.
+- No hidden validator work.
+- No large diagnostics experiment.
+- No global files changed.
+- No `install-global` run.
+
 ## Report Entry: Ask Final Synthesis And Progress Renderer
 
 ### Task

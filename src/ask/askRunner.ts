@@ -47,6 +47,8 @@ export interface RunAskOptions {
   maxSourcesPerWorker?: number;
   progressMode?: AskProgressMode;
   progressIntervalMs?: number;
+  progressPollIntervalMs?: number;
+  progressFrameIntervalMs?: number;
   fancyProgress?: boolean;
   isProgressTty?: boolean;
   progressWriter?: (message: string) => void;
@@ -422,13 +424,31 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
     mode: progressMode,
     isTty: options.isProgressTty,
     intervalMs: options.progressIntervalMs,
+    frameIntervalMs: options.progressFrameIntervalMs,
     fancy: options.fancyProgress,
     write: options.progressWriter ?? (() => undefined)
   });
-  let interval: NodeJS.Timeout | undefined;
+  let pollInterval: NodeJS.Timeout | undefined;
+  let frameInterval: NodeJS.Timeout | undefined;
+  let latestSnapshot: AskProgressSnapshot | undefined;
+  const refreshSnapshot = (message?: string, event?: string, overrides: Partial<AskProgressSnapshot> = {}): AskProgressSnapshot => {
+    latestSnapshot = {
+      ...progressSnapshot(options.cwd, job.runId, startedAt, message),
+      ...(event ? { event } : {}),
+      ...overrides
+    };
+    return latestSnapshot;
+  };
   if (progressMode !== "quiet") {
-    renderer.render({ ...progressSnapshot(options.cwd, job.runId, startedAt), event: "started" }, true);
-    interval = setInterval(() => renderer.render(progressSnapshot(options.cwd, job.runId, startedAt)), 1000);
+    latestSnapshot = refreshSnapshot(undefined, "started");
+    renderer.render(latestSnapshot, true);
+    pollInterval = setInterval(() => renderer.render(refreshSnapshot()), options.progressPollIntervalMs ?? 1000);
+    if (renderer.usesDynamicTty()) {
+      frameInterval = setInterval(() => {
+        if (!latestSnapshot) return;
+        renderer.render({ ...latestSnapshot, elapsedMs: Date.now() - startedAt });
+      }, options.progressFrameIntervalMs ?? 150);
+    }
   }
   try {
     const runOptions: RunJobOnceOptions = {
@@ -443,10 +463,7 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
         progressMode !== "quiet"
           ? (event) =>
               renderer.render(
-                {
-                  ...progressSnapshot(options.cwd, job.runId, startedAt, `${event.agent}/${event.bucket}: ${event.status} - ${event.message}`),
-                  event: event.status
-                },
+                refreshSnapshot(`${event.agent}/${event.bucket}: ${event.status} - ${event.message}`, event.status),
                 true
               )
           : undefined
@@ -473,13 +490,14 @@ export async function runAsk(options: RunAskOptions): Promise<AskResult> {
         noOrdinaryWebFallback: true
       };
     }
-    renderer.render({ ...progressSnapshot(options.cwd, completed.runId, startedAt), status: "synthesizing", event: "synthesizing" }, true);
+    renderer.render(refreshSnapshot(undefined, "synthesizing", { status: "synthesizing" }), true);
     const provider = defaultAnswerSynthesisProvider(options.cwd, completed.runId, options);
     const result = await askResultFromRunWithSynthesis(options.cwd, completed.runId, options.rawUserPrompt, synthesisOptions, provider, options.timeoutMs);
-    renderer.render({ ...progressSnapshot(options.cwd, completed.runId, startedAt), event: "completed" }, true);
+    renderer.render(refreshSnapshot(undefined, "completed"), true);
     return result;
   } finally {
-    if (interval) clearInterval(interval);
+    if (pollInterval) clearInterval(pollInterval);
+    if (frameInterval) clearInterval(frameInterval);
     renderer.finish();
   }
 }

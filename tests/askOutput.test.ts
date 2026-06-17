@@ -1,12 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import type { EvidenceItem } from "../src/coverage/evidenceLedger.js";
 import { runAsk } from "../src/ask/askRunner.js";
+import { synthesizeAnswerBodyWithProvider } from "../src/ask/answerSynthesisProvider.js";
 import { AskProgressRenderer } from "../src/ask/progressRenderer.js";
 import { resolveOutputLanguagePolicy } from "../src/i18n/languagePolicy.js";
 import { createHardflowJob, failHardflowJob } from "../src/jobs/jobStore.js";
+import type { ResearchReport } from "../src/schemas.js";
 
 function tempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "hardflow-ask-output-"));
@@ -136,6 +139,93 @@ describe("ask output language policy", () => {
     expect(result.answer).toContain("详情:");
     expect(result.failureReason).toContain("Router output failed schema");
   });
+
+  it("codex_cli answer synthesis does not block the Node event loop", async () => {
+    const cwd = tempRepo();
+    const binDir = mkdtempSync(join(tmpdir(), "hardflow-fake-codex-bin-"));
+    const sourceCodexHome = join(cwd, "source-codex-home");
+    const fakeCodex = join(binDir, "codex");
+    mkdirSync(sourceCodexHome);
+    writeFileSync(join(sourceCodexHome, "auth.json"), "{}\n");
+    writeFileSync(
+      fakeCodex,
+      `#!/bin/sh
+cat >/dev/null
+sleep 0.1
+printf '合成答案'
+`
+    );
+    chmodSync(fakeCodex, 0o755);
+    const previousPath = process.env.PATH;
+    const previousSourceHome = process.env.CODEX_HARDFLOW_SOURCE_CODEX_HOME;
+    process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+    process.env.CODEX_HARDFLOW_SOURCE_CODEX_HOME = sourceCodexHome;
+    let timerFired = false;
+    setTimeout(() => {
+      timerFired = true;
+    }, 20);
+    const item: EvidenceItem = {
+      id: "ev-1",
+      runId: "run-synthesis-async",
+      bucket: "official_docs",
+      engine: "official",
+      query: "q",
+      sourceType: "official_docs",
+      title: "Official source",
+      urlOrRef: "https://example.com",
+      dateOrVersion: "",
+      claim: "English claim",
+      confidence: "high",
+      retrievedAt: new Date().toISOString(),
+      perspectiveId: null,
+      researchQuestionId: null
+    };
+    const report = {
+      status: "completed",
+      runner_mode: "strict_programmatic",
+      coverageMode: "exhaustive",
+      parallelPolicy: "all_required",
+      required_buckets: ["official_docs"],
+      searched_but_no_signal: [],
+      excludedBuckets: [],
+      useful_findings: [],
+      source_gaps: [],
+      failure_reason: ""
+    } as unknown as ResearchReport;
+
+    try {
+      const result = await synthesizeAnswerBodyWithProvider({
+        cwd,
+        runId: "run-synthesis-async",
+        rawUserPrompt: "中文回答",
+        report,
+        items: [item],
+        coverage: null,
+        coverageSummary: {
+          coverageMode: "exhaustive",
+          parallelPolicy: "all_required",
+          requiredBucketCount: 1,
+          completedRequiredBucketCount: 1,
+          searchedButNoSignalCount: 0,
+          excludedBucketCount: 0,
+          sourceCount: 1,
+          evidenceItemCount: 1,
+          coverageScore: 100,
+          coverageClaim: null
+        },
+        languagePolicy: resolveOutputLanguagePolicy("中文回答"),
+        provider: "codex_cli"
+      });
+
+      expect(result.answerBody).toBe("合成答案");
+      expect(timerFired).toBe(true);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousSourceHome === undefined) delete process.env.CODEX_HARDFLOW_SOURCE_CODEX_HOME;
+      else process.env.CODEX_HARDFLOW_SOURCE_CODEX_HOME = previousSourceHome;
+    }
+  });
 });
 
 describe("ask progress renderer", () => {
@@ -144,7 +234,30 @@ describe("ask progress renderer", () => {
     const renderer = new AskProgressRenderer({ mode: "auto", isTty: true, write: (message) => writes.push(message), now: () => 0 });
     renderer.render({ runId: "run-a", status: "researching", completedBucketCount: 1, runningBucketCount: 2, failedBucketCount: 0 }, true);
 
-    expect(writes[0].startsWith("\x1b[2K\rHardFlow researching")).toBe(true);
+    expect(writes[0].startsWith("\x1b[2K\rHardFlow ")).toBe(true);
+    expect(writes[0]).toContain("\x1b[7mr\x1b[0mesearching");
+  });
+
+  it("auto TTY mode redraws animated frames without a new snapshot", () => {
+    let now = 0;
+    const writes: string[] = [];
+    const renderer = new AskProgressRenderer({
+      mode: "auto",
+      isTty: true,
+      frameIntervalMs: 150,
+      write: (message) => writes.push(message),
+      now: () => now
+    });
+    const snapshot = { runId: "run-a", status: "researching", completedBucketCount: 1, runningBucketCount: 2, failedBucketCount: 0 };
+    renderer.render(snapshot, true);
+    now = 149;
+    renderer.render(snapshot);
+    now = 150;
+    renderer.render(snapshot);
+
+    expect(writes).toHaveLength(2);
+    expect(writes[0]).not.toBe(writes[1]);
+    expect(writes[1]).toContain("r\x1b[7me\x1b[0msearching");
   });
 
   it("finish adds a newline after a TTY carriage-return status line", () => {
@@ -153,7 +266,7 @@ describe("ask progress renderer", () => {
     renderer.render({ runId: "run-a", status: "pending" }, true);
     renderer.finish();
 
-    expect(writes).toEqual([expect.stringMatching(/^\x1b\[2K\rHardFlow queued/), "\x1b[2K\r\n"]);
+    expect(writes).toEqual([expect.stringMatching(/^\x1b\[2K\rHardFlow \x1b\[7mq\x1b\[0mueued/), "\x1b[2K\r\n"]);
   });
 
   it("auto non-TTY suppresses duplicate progress lines", () => {
@@ -201,6 +314,8 @@ describe("ask progress renderer", () => {
     const renderer = new AskProgressRenderer({ mode: "minimal", isTty: true, write: (message) => writes.push(message), now: () => 0 });
     renderer.render({ runId: "run-minimal", status: "researching", elapsedMs: 65_000 }, true);
 
-    expect(writes[0]).toContain("\x1b[2K\rHardFlow researching 01:05");
+    expect(writes[0]).toContain("\x1b[2K\rHardFlow ");
+    expect(writes[0]).toContain("01:05");
+    expect(writes[0]).not.toContain("run ...");
   });
 });
